@@ -12,7 +12,10 @@ import path from "node:path";
 
 const dirPath = import.meta.dirname;
 export class GexepAgent extends BaseAgent {
-    constructor(agentDirectory: AgentDirectory = emptyAgentDirectory) {
+    constructor(
+        agentDirectory: AgentDirectory = emptyAgentDirectory,
+        memoryFilePath: string = path.join(dirPath, "memory.md"),
+    ) {
         const instructions = loadInstructions(dirPath);
         const agentName = path.basename(dirPath);
         const agentId = selectIdFromAgentTableStmt.get(agentName) as number;
@@ -52,6 +55,7 @@ export class GexepAgent extends BaseAgent {
             instructions,
             agentId,
             funcTools,
+            memoryFilePath,
             agentDirectory,
         );
     }
