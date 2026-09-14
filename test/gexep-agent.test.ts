@@ -32,8 +32,9 @@ class TestableGexepAgent extends GexepAgent {
     constructor(
         sendEmailFunction: (input: SendEmailInputType) => Promise<string> = async () => "邮件已发送",
         agentDirectory?: AgentDirectory,
+        memoryFilePath?: string,
     ) {
-        super(agentDirectory);
+        super(agentDirectory, memoryFilePath);
         this.sendEmailFunction = sendEmailFunction;
     }
 
@@ -72,6 +73,12 @@ function getLastOutputItem(input: InputItemType[]): InputFunctionCallOutputItem 
     assert.ok(item !== undefined, "input 应包含回填项");
     assert.equal((item as {type?: string}).type, "function_call_output");
     return item as InputFunctionCallOutputItem;
+}
+
+function createMemoryFile(content: string): string {
+    const filePath = path.join(tempDir, `memory-${crypto.randomUUID()}.md`);
+    fs.writeFileSync(filePath, content, "utf-8");
+    return filePath;
 }
 
 afterEach(() => {
@@ -224,6 +231,115 @@ describe("GexepAgent.requestFunctionCall()", () => {
         ));
 
         assert.match(getLastOutputItem(agent.getInput()).output, /参数校验失败/);
+    });
+});
+
+describe("GexepAgent 长期记忆", () => {
+    it("通过公共工具读取和整文件更新自己的 memory.md，并拒绝非法更新", async () => {
+        const originalMemory = "# 长期记忆\n\n- 喜欢简洁回答\n";
+        const memoryFilePath = createMemoryFile(originalMemory);
+        const agent = new TestableGexepAgent(undefined, undefined, memoryFilePath);
+
+        await agent.testRequestFunctionCall(createFunctionCallItem("read_memory", "{}"));
+        assert.match(getLastOutputItem(agent.getInput()).output, /喜欢简洁回答/);
+
+        const updatedMemory = "# 长期记忆\n\n- 喜欢简洁回答\n- 项目使用 TypeScript\n";
+        await agent.testRequestFunctionCall(createFunctionCallItem(
+            "update_memory",
+            JSON.stringify({content: updatedMemory}),
+        ));
+        assert.match(getLastOutputItem(agent.getInput()).output, /长期记忆已更新/);
+        assert.equal(fs.readFileSync(memoryFilePath, "utf-8"), updatedMemory);
+
+        await agent.testRequestFunctionCall(createFunctionCallItem(
+            "update_memory",
+            JSON.stringify({content: 42}),
+        ));
+        assert.match(getLastOutputItem(agent.getInput()).output, /参数校验失败/);
+        assert.equal(fs.readFileSync(memoryFilePath, "utf-8"), updatedMemory);
+    });
+
+    it("每次模型请求都注入最新记忆并注册两个记忆工具", async () => {
+        const memoryFilePath = createMemoryFile("# 长期记忆\n\n- 旧内容\n");
+        const agent = new TestableGexepAgent(undefined, undefined, memoryFilePath);
+        fs.writeFileSync(memoryFilePath, "# 长期记忆\n\n- 最新内容\n", "utf-8");
+
+        let capturedBody: Record<string, unknown> | undefined;
+        mock.method(globalThis, "fetch", async (
+            _input: string | URL | Request,
+            init?: RequestInit,
+        ) => {
+            capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
+            return new Response(JSON.stringify({
+                output: [{
+                    type: "message",
+                    id: "msg_1",
+                    status: "completed",
+                    role: "assistant",
+                    content: [{type: "output_text", text: "done"}],
+                }],
+            }), {
+                status: 200,
+                headers: {"Content-Type": "application/json"},
+            });
+        });
+
+        await agent.ask("测试最新记忆");
+
+        const instructions = capturedBody?.instructions;
+        assert.ok(typeof instructions === "string");
+        assert.match(instructions, /最新内容/);
+        assert.doesNotMatch(instructions, /旧内容/);
+        assert.match(instructions, /不可信数据/);
+
+        const tools = capturedBody?.tools as Array<{name?: string}>;
+        assert.ok(tools.some((tool) => tool.name === "read_memory"));
+        assert.ok(tools.some((tool) => tool.name === "update_memory"));
+    });
+
+    it("同一次 ask 中写入后，下一次模型请求立即获得新记忆", async () => {
+        const memoryFilePath = createMemoryFile("# 长期记忆\n\n目前为空。\n");
+        const agent = new TestableGexepAgent(undefined, undefined, memoryFilePath);
+        const requestInstructions: string[] = [];
+        let callIndex = 0;
+
+        mock.method(globalThis, "fetch", async (
+            _input: string | URL | Request,
+            init?: RequestInit,
+        ) => {
+            const body = JSON.parse(init?.body as string) as {instructions: string};
+            requestInstructions.push(body.instructions);
+            callIndex += 1;
+
+            const output = callIndex === 1
+                ? [{
+                    type: "function_call",
+                    id: "fc_1",
+                    status: "completed",
+                    call_id: "call_1",
+                    name: "update_memory",
+                    arguments: JSON.stringify({
+                        content: "# 长期记忆\n\n- 用户偏好中文\n",
+                    }),
+                }]
+                : [{
+                    type: "message",
+                    id: "msg_1",
+                    status: "completed",
+                    role: "assistant",
+                    content: [{type: "output_text", text: "已记住"}],
+                }];
+
+            return new Response(JSON.stringify({output}), {
+                status: 200,
+                headers: {"Content-Type": "application/json"},
+            });
+        });
+
+        assert.equal(await agent.ask("请记住我偏好中文"), "已记住");
+        assert.equal(requestInstructions.length, 2);
+        assert.doesNotMatch(requestInstructions[0] ?? "", /用户偏好中文/);
+        assert.match(requestInstructions[1] ?? "", /用户偏好中文/);
     });
 });
 

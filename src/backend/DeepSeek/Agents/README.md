@@ -25,6 +25,8 @@ Agent 名称来自现实好友中文名的拼音首字母：在三个字母之�
 
 内部形成对等拓扑：四个已实现 Agent 共享受控 Agent Card 目录，每个 Agent 的模型工具中都有 `discover_agents` 和 `delegate_task`。发现会排除自身并返回其他在线 Agent 的标准 Card；委派则由官方 A2A Client 调用 Card 中的接口。Jezeh、Lexey、Zebeh 的端点只监听回环地址，因此能被同一运行环境中的伙伴寻址，却不会进入公开 API。
 
+每个已实现 Agent 的目录还包含独立的 `memory.md`。基类为它们统一提供 `read_memory` 和 `update_memory`，并在每次模型请求前注入最新记忆；记忆不会在 Agent 之间自动共享。公共的保存准则、敏感信息边界和不可信数据规则定义在同级 `memory-instructions.md`。
+
 当前感知、可寻址和跨 Agent 消息委派均已实现。运行时会等待下游 Task 结束并把 Artifact 文本交回调用 Agent；多目标并行调度、跨重启恢复和独立的长期任务监控仍未实现。
 
 关于路由、Sandbox、工具归属和审核 Agent 的设计理由，见 [THINKING.md](../../THINKING.md)。

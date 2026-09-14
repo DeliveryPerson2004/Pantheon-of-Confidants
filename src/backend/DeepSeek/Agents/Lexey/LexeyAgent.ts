@@ -12,7 +12,10 @@ const dirPath = import.meta.dirname;
 const skillsDirPath = path.join(dirPath, "skills");
 
 export class LexeyAgent extends BaseAgent{
-    constructor(agentDirectory: AgentDirectory = emptyAgentDirectory) {
+    constructor(
+        agentDirectory: AgentDirectory = emptyAgentDirectory,
+        memoryFilePath: string = path.join(dirPath, "memory.md"),
+    ) {
         const instructions = loadInstructions(dirPath, true);
         const agentName = path.basename(dirPath);
         const agentId = selectIdFromAgentTableStmt.get(agentName) as number;
@@ -45,6 +48,7 @@ export class LexeyAgent extends BaseAgent{
             instructions,
             agentId,
             funcTools,
+            memoryFilePath,
             agentDirectory,
         );
     }

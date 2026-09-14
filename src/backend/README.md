@@ -34,7 +34,8 @@ src/backend/
 ├── DeepSeek/
 │   ├── API/responses.ts          # 请求和响应的 TypeScript 类型契约
 │   ├── Agents/
-│   │   ├── BaseAgent.ts          # 对话循环、共同发现/委派工具、工具回填和历史持久化
+│   │   ├── BaseAgent.ts          # 对话循环、长期记忆、共同工具、工具回填和历史持久化
+│   │   ├── memory-instructions.md # 所有 Agent 共用的长期记忆系统规则
 │   │   ├── Gexep/                # 入口 Agent；已接入邮件工具
 │   │   ├── Jezeh/                # 备忘录 Agent；已接入 E2B 与下载工具
 │   │   ├── Lexey/                # 语言 Agent；已接入网页搜索与 Skill
@@ -45,6 +46,7 @@ src/backend/
 │   └── jezehMemoSandbox.ts       # 创建、连接并复用 Jezeh Sandbox
 ├── Tools/
 │   ├── loadInstructions.ts       # 读取角色指令，可选注入 Skill 元数据
+│   ├── agentMemory.ts            # Agent 长期记忆的读取、校验与原子更新
 │   ├── loadSkill.ts              # 按名称加载 Skill 正文
 │   ├── sendEmail.ts              # 向固定邮箱发送邮件
 │   ├── executeE2BShell.ts        # 在 `/memos` 中执行沙箱命令
@@ -68,7 +70,7 @@ src/backend/
   → 获取 Gexep Agent Card
   → 使用 A2A-Version: 1.0 调用 /a2a
   → 官方 DefaultRequestHandler 校验协议并创建 Task
-  → Gexep 加载角色指令、专属工具和共同的 discover_agents / delegate_task
+  → Gexep 加载角色指令、自己的 memory.md、专属工具和共同工具
   → 需要了解伙伴时，从运行时目录获取其 Agent Card、能力与 RPC 地址
   → 需要专业协作时，ClientFactory 根据目标 Card 调用其 A2A 端点
   → BaseAgent 调用 ModelClient
@@ -96,7 +98,7 @@ src/backend/
 | `agent` | 保存 Agent 名称、当前最大轮次和创建时间；初始化时登记 Gexep、Jezeh、Lexey、Zebeh |
 | `message` | 按 `agent_id` 保存序列化的输入项数组，并通过 `is_activated` 控制是否恢复 |
 
-每次实例化 Agent 时，`BaseAgent` 会读取该 Agent 的已激活历史；一次 `ask()` 完成后，只写入本轮新增的输入与输出。这里保存的是对话上下文，不是可检索、可归纳的长期记忆。
+每次实例化 Agent 时，`BaseAgent` 会读取该 Agent 的已激活历史；一次 `ask()` 完成后，只写入本轮新增的输入与输出。这是完整的对话上下文。与之分离的长期记忆保存在各 Agent 目录的 `memory.md` 中，由共同的 `read_memory`、`update_memory` 工具维护，并在每次模型请求前刷新。
 
 ## 5. 配置与运行
 

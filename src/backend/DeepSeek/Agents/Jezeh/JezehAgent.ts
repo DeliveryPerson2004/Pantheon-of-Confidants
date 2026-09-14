@@ -28,6 +28,7 @@ export class JezehAgent extends BaseAgent {
         downloadMemoFunction: DownloadMemoFunction = downloadMemo,
         executeE2BShellFunction: ExecuteE2BShellFunction = executeE2BShell,
         agentDirectory: AgentDirectory = emptyAgentDirectory,
+        memoryFilePath: string = path.join(dirPath, "memory.md"),
     ) {
         const instructions = loadInstructions(dirPath);
         const agentName = path.basename(dirPath);
@@ -71,6 +72,7 @@ export class JezehAgent extends BaseAgent {
             instructions,
             agentId,
             funcTools,
+            memoryFilePath,
             agentDirectory,
         );
 

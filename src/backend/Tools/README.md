@@ -7,6 +7,7 @@
 | 文件 | 工具或用途 | 使用方 |
 | ---- | ---------- | ------ |
 | `loadInstructions.ts` | 读取 `instructions.md`，并可选注入 Skill 元数据 | 所有 Agent；元数据注入目前仅用于 Lexey |
+| `agentMemory.ts` | `read_memory`、`update_memory`：读取或原子替换 Agent 自身的 `memory.md` | 所有 Agent，由 `BaseAgent` 统一注册 |
 | `loadSkill.ts` | `load_skill`：按 frontmatter 中的 `name` 加载 `SKILL.md` 正文 | Lexey |
 | `sendEmail.ts` | `send_email`：通过固定 QQ SMTP 配置发送邮件 | Gexep |
 | `executeE2BShell.ts` | `e2b_shell_execute`：在 E2B 的 `/memos` 中执行命令 | Jezeh |
@@ -20,6 +21,12 @@
 `loadInstructions(dirPath, isLoadSkills)` 始终读取 Agent 目录中的 `instructions.md`。当 `isLoadSkills` 为 `true` 时，它还会扫描同级 `skills/*/SKILL.md`，提取 frontmatter 中的 `name` 和 `description`，将能力清单追加到角色指令中。
 
 模型需要详细步骤时可调用 `load_skill`。`loadSkill()` 会按 `name` 找到目标文件，移除 frontmatter 后返回正文。这样常驻上下文只包含简短元数据，完整 Skill 内容按需加载。
+
+## 长期记忆
+
+每个 Agent 绑定自己目录中的 `memory.md`，模型不能通过工具参数选择路径或访问其他 Agent 的文件。`BaseAgent` 在每次模型请求前读取最新内容，并将公共规则 `Agents/memory-instructions.md` 与 JSON 编码后的记忆正文追加到系统指令。
+
+`read_memory` 返回当前完整正文；`update_memory` 要求模型提交更新后的完整 Markdown，最多 65,536 个字符。更新先写同目录临时文件，再原子替换目标文件；参数无效或写入失败时保留原内容。系统规则要求只保存稳定且未来有用的信息，落实用户的记住、纠正和遗忘要求，并禁止保存凭据等秘密。
 
 ## 邮件工具
 

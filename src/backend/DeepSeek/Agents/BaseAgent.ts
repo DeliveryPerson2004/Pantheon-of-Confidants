@@ -20,6 +20,19 @@ import {
     emptyAgentDirectory,
 } from "../../A2A/InternalAgentRegistry.ts";
 import type {DelegationTrace} from "../../A2A/DelegationContext.ts";
+import fs from "node:fs";
+import path from "node:path";
+import {
+    readAgentMemory,
+    updateAgentMemory,
+    updateAgentMemoryInputSchema,
+} from "../../Tools/agentMemory.ts";
+
+
+const longTermMemoryInstructions = fs.readFileSync(
+    path.join(import.meta.dirname, "memory-instructions.md"),
+    "utf-8",
+);
 
 export type AgentEvent =
     | {type: "start"; agentName: string}
@@ -42,7 +55,8 @@ export type AgentEventListener = (event: AgentEvent) => void;
 
 export abstract class BaseAgent{
     private readonly functionTools: ToolsType;
-    private readonly instructions: string;
+    private readonly baseInstructions: string;
+    private readonly memoryFilePath: string;
     private readonly model: ModelType;
     private modelClient: ModelClient;
     private eventListener: AgentEventListener | undefined;
@@ -59,10 +73,36 @@ export abstract class BaseAgent{
         instructions: string,
         agentId: number,
         functionTools: ToolsType,
+        memoryFilePath: string,
         agentDirectory: AgentDirectory = emptyAgentDirectory,
     ) {
         this.functionTools = [
             ...functionTools,
+            {
+                type: "function",
+                name: "read_memory",
+                description: "读取当前 Agent 自己的完整长期记忆。仅在需要确认最新原文、准备覆盖更新或用户明确要求查看时调用；不能读取其他 Agent 的记忆。",
+                parameters: {
+                    type: "object",
+                    properties: {},
+                    required: [],
+                },
+            },
+            {
+                type: "function",
+                name: "update_memory",
+                description: "用完整 Markdown 内容替换当前 Agent 自己的长期记忆。用于保存稳定且未来有用的信息，或落实用户要求的记住、纠正和遗忘；必须保留仍有效的无关条目。",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        content: {
+                            type: "string",
+                            description: "更新后的 memory.md 完整 Markdown 内容，不是增量或补丁。",
+                        },
+                    },
+                    required: ["content"],
+                },
+            },
             {
                 type: "function",
                 name: "discover_agents",
@@ -102,7 +142,9 @@ export abstract class BaseAgent{
                 },
             },
         ];
-        this.instructions = instructions;
+        this.baseInstructions = instructions;
+        this.memoryFilePath = memoryFilePath;
+        readAgentMemory(this.memoryFilePath);
         this.model = model;
         this.modelClient = new ModelClient();
         this.agentDirectory = agentDirectory;
@@ -191,8 +233,19 @@ export abstract class BaseAgent{
 
     protected abstract requestFunctionCall(inputFunctionCallItem: InputFunctionCallItem): Promise<void>;
 
+    private getInstructions(): string {
+        const memory = readAgentMemory(this.memoryFilePath);
+        return `${this.baseInstructions}\n\n${longTermMemoryInstructions}\n${JSON.stringify(memory)}`;
+    }
+
     protected async requestFunctionCallWithCommonTools(inputFunctionCallItem: InputFunctionCallItem): Promise<void> {
-        if (inputFunctionCallItem.name !== "discover_agents" && inputFunctionCallItem.name !== "delegate_task") {
+        const commonToolNames = new Set([
+            "read_memory",
+            "update_memory",
+            "discover_agents",
+            "delegate_task",
+        ]);
+        if (!commonToolNames.has(inputFunctionCallItem.name)) {
             await this.requestFunctionCall(inputFunctionCallItem);
             return;
         }
@@ -205,6 +258,56 @@ export abstract class BaseAgent{
                 inputFunctionCallItem,
                 `${inputFunctionCallItem.name} 参数解析失败：arguments 不是合法的 JSON。`,
             );
+            return;
+        }
+
+        if (inputFunctionCallItem.name === "read_memory") {
+            const result = z.object({}).strict().safeParse(parsedArguments);
+            if (!result.success) {
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    `read_memory 参数校验失败：${result.error.message}`,
+                );
+                return;
+            }
+
+            try {
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    readAgentMemory(this.memoryFilePath),
+                );
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    `读取长期记忆失败：${message}`,
+                );
+            }
+            return;
+        }
+
+        if (inputFunctionCallItem.name === "update_memory") {
+            const result = updateAgentMemoryInputSchema.safeParse(parsedArguments);
+            if (!result.success) {
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    `update_memory 参数校验失败：${result.error.message}`,
+                );
+                return;
+            }
+
+            try {
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    updateAgentMemory(this.memoryFilePath, result.data),
+                );
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    `更新长期记忆失败：${message}`,
+                );
+            }
             return;
         }
 
@@ -296,7 +399,7 @@ export abstract class BaseAgent{
                 const response: ResponseSchema = await this.modelClient.requestResponsesAPI(
                     this.model,
                     this.input,
-                    this.instructions,
+                    this.getInstructions(),
                     this.functionTools,
                     this.agentName,
                 );
