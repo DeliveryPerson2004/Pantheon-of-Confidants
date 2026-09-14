@@ -1,5 +1,5 @@
 import express, {type Express} from "express";
-import {buildAgentCard, createAgentA2AApp} from "./GexepA2AServer.ts";
+import {createAgentA2AApp} from "./GexepA2AServer.ts";
 import type {InternalAgentRegistry} from "./InternalAgentRegistry.ts";
 
 /**
@@ -10,15 +10,9 @@ export function createInternalA2AApp(registry: InternalAgentRegistry): Express {
     const app = express();
     app.disable("x-powered-by");
 
-    for (const {profile, agent} of registry.entries("internal")) {
-        const card = buildAgentCard({
-            name: profile.name,
-            description: profile.description,
-            rpcUrl: profile.rpcUrl,
-            skills: profile.skills,
-        });
+    for (const {card, agent} of registry.entries("internal")) {
         app.use(
-            `/agents/${profile.name.toLocaleLowerCase()}`,
+            `/agents/${card.name.toLocaleLowerCase()}`,
             createAgentA2AApp(agent, {agentCard: card}),
         );
     }

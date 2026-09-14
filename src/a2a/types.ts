@@ -1,177 +1,73 @@
-export const A2A_PROTOCOL_VERSION = "1.0";
-export const A2A_AGENT_CARD_PATH = "/.well-known/agent-card.json";
+import {
+    AGENT_CARD_PATH,
+    Role,
+    TaskState,
+    type Message,
+    type Part,
+    type Task,
+} from "@a2a-js/sdk";
+
+export {
+    A2A_PROTOCOL_VERSION,
+    Role,
+    TaskState,
+    type AgentCard,
+    type AgentSkill,
+    type Artifact,
+    type Message,
+    type Part,
+    type SendMessageRequest,
+    type SendMessageResult,
+    type StreamResponse,
+    type Task,
+    type TaskArtifactUpdateEvent,
+    type TaskStatusUpdateEvent,
+} from "@a2a-js/sdk";
+
+export const A2A_AGENT_CARD_PATH = `/${AGENT_CARD_PATH}`;
 export const A2A_RPC_PATH = "/a2a";
 
-export type JsonRpcId = string | number;
-
-export interface AgentInterface {
-    url: string;
-    protocolBinding: "JSONRPC";
-    protocolVersion: string;
-}
-
-export interface AgentCard {
-    name: string;
-    description: string;
-    supportedInterfaces: AgentInterface[];
-    version: string;
-    capabilities: {
-        streaming?: boolean;
-        pushNotifications?: boolean;
-        extendedAgentCard?: boolean;
+export function textPart(text: string, mediaType = "text/plain"): Part {
+    return {
+        content: {$case: "text", value: text},
+        metadata: undefined,
+        filename: "",
+        mediaType,
     };
-    securitySchemes?: Record<string, {
-        httpAuthSecurityScheme: {
-            scheme: string;
-            description?: string;
-        };
-    }>;
-    securityRequirements?: Array<Record<string, string[]>>;
-    defaultInputModes: string[];
-    defaultOutputModes: string[];
-    skills: Array<{
-        id: string;
-        name: string;
-        description: string;
-        tags: string[];
-        examples?: string[];
-    }>;
 }
 
-export interface A2APart {
-    text?: string;
-    raw?: string;
-    url?: string;
-    data?: unknown;
-    mediaType?: string;
-    filename?: string;
-    metadata?: Record<string, unknown>;
-}
-
-export interface A2AMessage {
-    messageId: string;
-    role: "ROLE_USER" | "ROLE_AGENT";
-    parts: A2APart[];
-    contextId?: string;
-    taskId?: string;
-    metadata?: Record<string, unknown>;
-    extensions?: string[];
-    referenceTaskIds?: string[];
-}
-
-export type TaskState =
-    | "TASK_STATE_SUBMITTED"
-    | "TASK_STATE_WORKING"
-    | "TASK_STATE_COMPLETED"
-    | "TASK_STATE_FAILED"
-    | "TASK_STATE_CANCELED"
-    | "TASK_STATE_INPUT_REQUIRED"
-    | "TASK_STATE_REJECTED"
-    | "TASK_STATE_AUTH_REQUIRED";
-
-export interface TaskStatus {
-    state: TaskState;
-    timestamp: string;
-    message?: A2AMessage;
-}
-
-export interface Artifact {
-    artifactId: string;
-    name?: string;
-    description?: string;
-    parts: A2APart[];
-}
-
-export interface Task {
-    id: string;
-    contextId: string;
-    status: TaskStatus;
-    artifacts?: Artifact[];
-    history?: A2AMessage[];
-    metadata?: Record<string, unknown>;
-}
-
-export interface TaskStatusUpdateEvent {
-    taskId: string;
-    contextId: string;
-    status: TaskStatus;
-}
-
-export interface TaskArtifactUpdateEvent {
-    taskId: string;
-    contextId: string;
-    artifact: Artifact;
-    append?: boolean;
-    lastChunk?: boolean;
-}
-
-export type StreamResponse =
-    | {task: Task}
-    | {message: A2AMessage}
-    | {statusUpdate: TaskStatusUpdateEvent}
-    | {artifactUpdate: TaskArtifactUpdateEvent};
-
-export interface JsonRpcRequest {
-    jsonrpc: "2.0";
-    id: JsonRpcId;
-    method: string;
-    params?: unknown;
-}
-
-export interface JsonRpcSuccess<T> {
-    jsonrpc: "2.0";
-    id: JsonRpcId;
-    result: T;
-}
-
-export interface JsonRpcErrorObject {
-    code: number;
-    message: string;
-    data?: Array<Record<string, unknown>>;
-}
-
-export interface JsonRpcError {
-    jsonrpc: "2.0";
-    id: JsonRpcId | null;
-    error: JsonRpcErrorObject;
-}
-
-export type JsonRpcResponse<T> = JsonRpcSuccess<T> | JsonRpcError;
-
-export interface SendMessageParams {
-    message: A2AMessage;
-    configuration?: {
-        acceptedOutputModes?: string[];
-        historyLength?: number;
-        returnImmediately?: boolean;
-        taskPushNotificationConfig?: unknown;
+export function userMessage(text: string, contextId?: string): Message {
+    return {
+        messageId: crypto.randomUUID(),
+        contextId: contextId ?? "",
+        taskId: "",
+        role: Role.ROLE_USER,
+        parts: [textPart(text)],
+        metadata: undefined,
+        extensions: [],
+        referenceTaskIds: [],
     };
-    metadata?: Record<string, unknown>;
 }
 
-export interface SendMessageResult {
-    task?: Task;
-    message?: A2AMessage;
-}
-
-export interface ListTasksResult {
-    tasks: Task[];
-    nextPageToken: string;
-    pageSize: number;
-    totalSize: number;
-}
-
-export function textFromParts(parts: A2APart[]): string {
+export function textFromParts(parts: Part[]): string {
     return parts
-        .map((part) => part.text ?? "")
+        .flatMap((part) => part.content?.$case === "text" ? [part.content.value] : [])
         .filter(Boolean)
         .join("\n");
 }
 
+export function textFromMessage(message: Message): string {
+    return textFromParts(message.parts);
+}
+
 export function textFromTask(task: Task): string {
-    return (task.artifacts ?? [])
+    return task.artifacts
         .flatMap((artifact) => artifact.parts)
-        .map((part) => part.text ?? "")
+        .flatMap((part) => part.content?.$case === "text" ? [part.content.value] : [])
         .filter(Boolean)
         .join("\n\n");
+}
+
+export function taskStateLabel(state: TaskState): string {
+    return TaskState[state] ?? "TASK_STATE_UNSPECIFIED";
 }

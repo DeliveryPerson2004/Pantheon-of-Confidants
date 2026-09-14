@@ -29,6 +29,7 @@
     "#base-agent": "./src/backend/DeepSeek/Agents/BaseAgent.ts"
   },
   "dependencies": {
+    "@a2a-js/sdk": "^1.1.0",
     "@earendil-works/pi-tui": "^0.85.1",
     "better-sqlite3": "^13.0.3",
     "dotenv": "^17.4.2",

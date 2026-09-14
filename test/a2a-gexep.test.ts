@@ -1,47 +1,79 @@
 import assert from "node:assert/strict";
 import {describe, it} from "node:test";
-import {GexepA2AClient, type GexepClientEvent} from "../src/a2a/GexepA2AClient.ts";
 import {
-    A2A_AGENT_CARD_PATH,
-    A2A_PROTOCOL_VERSION,
-    type JsonRpcRequest,
-    type JsonRpcSuccess,
-    type ListTasksResult,
-    type StreamResponse,
-} from "../src/a2a/types.ts";
+    AgentCard,
+    SendMessageRequest,
+    StreamResponse,
+} from "@a2a-js/sdk";
+import {
+    DefaultRequestHandler,
+    InMemoryTaskStore,
+    defaultServerCallContextBuilder,
+} from "@a2a-js/sdk/server";
+import {GexepA2AClient, type GexepClientEvent} from "../src/a2a/GexepA2AClient.ts";
+import {A2A_AGENT_CARD_PATH, A2A_PROTOCOL_VERSION} from "../src/a2a/types.ts";
 import {
     buildGexepAgentCard,
-    GexepTaskService,
+    createGexepA2AApp,
+    PantheonAgentExecutor,
     type GexepAgentPort,
 } from "../src/backend/A2A/GexepA2AServer.ts";
+import type {DelegationTrace} from "../src/backend/A2A/DelegationContext.ts";
 import type {AgentEventListener} from "../src/backend/DeepSeek/Agents/BaseAgent.ts";
 
 class FakeGexepAgent implements GexepAgentPort {
     private listener: AgentEventListener | undefined;
+    readonly traces: Array<DelegationTrace | undefined> = [];
 
     setEventListener(listener: AgentEventListener | undefined): void {
         this.listener = listener;
     }
 
-    async ask(input: string): Promise<string> {
-        this.listener?.({type: "start", agentName: "Gexep"});
+    async ask(input: string, options?: {delegationTrace?: DelegationTrace}): Promise<string> {
+        this.traces.push(options?.delegationTrace);
         this.listener?.({type: "function_call", name: "internal_tool"});
-        const answer = `Gexep: ${input}`;
-        this.listener?.({type: "message", text: answer});
-        this.listener?.({type: "complete", agentName: "Gexep"});
-        return answer;
+        return `Gexep: ${input}`;
     }
 }
 
-function sendParams(text: string, contextId?: string) {
-    return {
-        message: {
-            messageId: crypto.randomUUID(),
-            role: "ROLE_USER" as const,
-            parts: [{text, mediaType: "text/plain"}],
-            ...(contextId === undefined ? {} : {contextId}),
-        },
-        configuration: {acceptedOutputModes: ["text/markdown"]},
+function createSdkFetch(
+    card: AgentCard,
+    handler: DefaultRequestHandler,
+    requests: Array<Record<string, unknown>>,
+): typeof fetch {
+    return async (_input, init) => {
+        if (init?.body === undefined) {
+            return Response.json(AgentCard.toJSON(card), {
+                headers: {"Content-Type": "application/a2a+json"},
+            });
+        }
+
+        const envelope = JSON.parse(String(init.body)) as {
+            id: number;
+            method: string;
+            params: unknown;
+        };
+        requests.push(envelope as unknown as Record<string, unknown>);
+        assert.equal(envelope.method, "SendStreamingMessage");
+        const request = SendMessageRequest.fromJSON(envelope.params);
+        const context = defaultServerCallContextBuilder({
+            extensions: undefined,
+            user: undefined,
+            headers: {},
+            requestedVersion: A2A_PROTOCOL_VERSION,
+            tenant: request.tenant,
+        });
+        const chunks: string[] = [];
+        for await (const event of handler.sendMessageStream(request, context)) {
+            chunks.push(`data: ${JSON.stringify({
+                jsonrpc: "2.0",
+                id: envelope.id,
+                result: StreamResponse.toJSON(event),
+            })}\n\n`);
+        }
+        return new Response(chunks.join(""), {
+            headers: {"Content-Type": "text/event-stream"},
+        });
     };
 }
 
@@ -52,8 +84,8 @@ describe("Gexep A2A public boundary", () => {
         assert.equal(card.name, "Gexep");
         assert.equal(card.supportedInterfaces[0]?.url, "https://pantheon.example/a2a");
         assert.equal(card.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
-        assert.equal(card.supportedInterfaces[0]?.protocolVersion, "1.0");
-        assert.equal(card.capabilities.streaming, true);
+        assert.equal(card.supportedInterfaces[0]?.protocolVersion, A2A_PROTOCOL_VERSION);
+        assert.equal(card.capabilities?.streaming, true);
         assert.equal(JSON.stringify(card).includes("Lexey"), false);
         assert.equal(JSON.stringify(card).includes("Jezeh"), false);
         assert.equal(JSON.stringify(card).includes("Zebeh"), false);
@@ -66,134 +98,54 @@ describe("Gexep A2A public boundary", () => {
             apiToken: "secret",
         });
 
-        assert.equal(publicCard.securitySchemes, undefined);
-        assert.equal(protectedCard.securitySchemes?.bearerAuth?.httpAuthSecurityScheme.scheme, "Bearer");
-        assert.deepEqual(protectedCard.securityRequirements, [{bearerAuth: []}]);
+        assert.deepEqual(publicCard.securitySchemes, {});
+        assert.equal(
+            protectedCard.securitySchemes.bearerAuth?.scheme?.$case,
+            "httpAuthSecurityScheme",
+        );
+        assert.deepEqual(
+            protectedCard.securityRequirements,
+            [{schemes: {bearerAuth: {list: []}}}],
+        );
+    });
+
+    it("mounts only discovery, bearer guard, and the JSON-RPC handler", () => {
+        const app = createGexepA2AApp(new FakeGexepAgent(), {
+            publicBaseUrl: "https://pantheon.example",
+            apiToken: "secret",
+        });
+        const layers = app.router.stack as Array<{path?: string}>;
+
+        assert.equal(layers.length, 3);
+        assert.equal(JSON.stringify(layers).includes("Jezeh"), false);
+        assert.equal(A2A_AGENT_CARD_PATH, "/.well-known/agent-card.json");
     });
 });
 
-describe("Gexep A2A task service", () => {
-    it("creates a completed task whose answer is an artifact", async () => {
-        const service = new GexepTaskService(new FakeGexepAgent());
-        const params = sendParams("你好");
-        const task = service.createTask(params);
-        await service.runTask(task, "你好");
-
-        const fetched = service.getTask(task.id);
-        assert.equal(fetched.status.state, "TASK_STATE_COMPLETED");
-        assert.equal(fetched.artifacts?.[0]?.parts[0]?.text, "Gexep: 你好");
-        assert.equal(fetched.history?.[0]?.messageId, params.message.messageId);
-    });
-
-    it("lists newest tasks and omits artifacts by default", async () => {
-        const service = new GexepTaskService(new FakeGexepAgent());
-        const task = service.createTask(sendParams("列表测试"));
-        await service.runTask(task, "列表测试");
-
-        const listed: ListTasksResult = service.listTasks({});
-        assert.equal(listed.totalSize, 1);
-        assert.equal(listed.tasks[0]?.artifacts, undefined);
-        assert.equal(service.listTasks({includeArtifacts: true}).tasks[0]?.artifacts?.length, 1);
-    });
-
-    it("serializes execution because BaseAgent conversation state is mutable", async () => {
-        const order: string[] = [];
-        const agent: GexepAgentPort = {
-            setEventListener: () => undefined,
-            ask: async (input) => {
-                order.push(`start:${input}`);
-                await Promise.resolve();
-                order.push(`end:${input}`);
-                return input;
-            },
-        };
-        const service = new GexepTaskService(agent);
-        const first = service.createTask(sendParams("first"));
-        const second = service.createTask(sendParams("second"));
-
-        await Promise.all([
-            service.runTask(first, "first"),
-            service.runTask(second, "second"),
-        ]);
-        assert.deepEqual(order, ["start:first", "end:first", "start:second", "end:second"]);
-    });
-});
-
-describe("Gexep A2A frontend client", () => {
-    it("discovers the card, consumes SSE, and reuses the server contextId", async () => {
-        const requests: JsonRpcRequest[] = [];
-        const fetchImplementation: typeof fetch = async (input, init) => {
-            if (String(input).endsWith(A2A_AGENT_CARD_PATH)) {
-                return Response.json(buildGexepAgentCard({publicBaseUrl: "https://pantheon.example"}), {
-                    headers: {"Content-Type": "application/a2a+json"},
-                });
-            }
-
-            const request = JSON.parse(String(init?.body)) as JsonRpcRequest;
-            requests.push(request);
-            const params = request.params as ReturnType<typeof sendParams>;
-            const contextId = params.message.contextId ?? "server-context";
-            const taskId = crypto.randomUUID();
-            const answer = `Gexep: ${params.message.parts[0]?.text}`;
-            const events: StreamResponse[] = [
-                {
-                    task: {
-                        id: taskId,
-                        contextId,
-                        status: {state: "TASK_STATE_SUBMITTED", timestamp: new Date().toISOString()},
-                    },
-                },
-                {
-                    statusUpdate: {
-                        taskId,
-                        contextId,
-                        status: {state: "TASK_STATE_WORKING", timestamp: new Date().toISOString()},
-                    },
-                },
-                {
-                    artifactUpdate: {
-                        taskId,
-                        contextId,
-                        artifact: {
-                            artifactId: crypto.randomUUID(),
-                            parts: [{text: answer, mediaType: "text/markdown"}],
-                        },
-                        lastChunk: true,
-                    },
-                },
-                {
-                    statusUpdate: {
-                        taskId,
-                        contextId,
-                        status: {state: "TASK_STATE_COMPLETED", timestamp: new Date().toISOString()},
-                    },
-                },
-            ];
-            const sse = events.map((event) => {
-                const envelope: JsonRpcSuccess<StreamResponse> = {
-                    jsonrpc: "2.0",
-                    id: request.id,
-                    result: event,
-                };
-                return `data: ${JSON.stringify(envelope)}\n\n`;
-            }).join("");
-            return new Response(sse, {headers: {"Content-Type": "text/event-stream"}});
-        };
+describe("Gexep official A2A client/server integration", () => {
+    it("runs the official ClientFactory against DefaultRequestHandler and reuses contextId", async () => {
+        const agent = new FakeGexepAgent();
+        const card = buildGexepAgentCard({publicBaseUrl: "https://pantheon.example"});
+        const handler = new DefaultRequestHandler(
+            card,
+            new InMemoryTaskStore(),
+            new PantheonAgentExecutor(agent, "Gexep"),
+        );
+        const requests: Array<Record<string, unknown>> = [];
         const client = new GexepA2AClient({
             agentCardUrl: "https://pantheon.example/.well-known/agent-card.json",
-            fetchImplementation,
+            fetchImplementation: createSdkFetch(card, handler, requests),
         });
         const events: GexepClientEvent[] = [];
         client.setEventListener((event) => events.push(event));
 
         assert.equal(await client.ask("第一轮"), "Gexep: 第一轮");
         assert.equal(await client.ask("第二轮"), "Gexep: 第二轮");
-        assert.equal(requests[0]?.method, "SendStreamingMessage");
-        assert.equal(
-            (requests[1]?.params as ReturnType<typeof sendParams>).message.contextId,
-            "server-context",
-        );
+        const first = SendMessageRequest.fromJSON(requests[0]?.params);
+        const second = SendMessageRequest.fromJSON(requests[1]?.params);
+        assert.equal(first.message?.contextId, "");
+        assert.ok((second.message?.contextId.length ?? 0) > 0);
+        assert.equal(first.message?.parts[0]?.content?.$case, "text");
         assert.ok(events.some((event) => event.type === "status"));
-        assert.equal(A2A_PROTOCOL_VERSION, "1.0");
     });
 });

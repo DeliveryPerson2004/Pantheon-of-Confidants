@@ -13,7 +13,7 @@
 ## 已实现的能力
 
 - **强类型 Agent Loop**：通过 Node.js 原生 `fetch` 调用 DeepSeek `/responses` API，逐项处理 `message`、`reasoning`、`function_call` 和 `web_search_call`，并将工具结果回填给模型继续推理。
-- **A2A 1.0 对等网络**：Gexep、Jezeh、Lexey、Zebeh 均拥有 Agent Card 和 JSON-RPC/SSE 消息端点；共享的动态目录让每个 Agent 都能发现其余在线节点、职责、技能和地址。
+- **官方 A2A 1.0 对等网络**：基于 `@a2a-js/sdk` 的 Agent Card、`AgentExecutor`、`DefaultRequestHandler`、`ClientFactory` 和 JSON-RPC/SSE transport；四个 Agent 可以发现彼此并真正委派子任务。
 - **前后端进程分离**：终端 UI 作为独立客户端读取 Gexep Agent Card 后调用远端接口，不直接实例化任何后端 Agent；后端同时承载公开入口与仅回环可达的内部 A2A 服务。
 - **单一公开 Agent**：对外只暴露 Gexep 的 Agent Card 与 RPC 入口；Jezeh、Lexey、Zebeh 的卡片和路由固定监听 `127.0.0.1`，不成为公网 API。可选 Bearer Token 用于保护公开 RPC。
 - **按角色分配能力**：Gexep 可向固定邮箱发送邮件，以便主动与我联系，让我离开电脑时也能通过手机查看它想传达的消息；Lexey 负责语言任务，并支持网页搜索和按需加载 Skill；Jezeh 在网络隔离的 E2B Sandbox 中管理 Markdown 备忘录；Zebeh 用于开发阶段的行为验证。
@@ -22,7 +22,7 @@
 - **全屏终端界面**：基于 `pi-tui` 提供独立的 Gexep A2A 客户端、Markdown 渲染、滚动搜索、命令补全和任务状态提示。
 - **轻量工程栈**：TypeScript、ESM、pnpm、tsx 和 Node.js 内置测试框架，不引入模型 SDK 或 ORM。
 
-MCP 客户端、跨 Agent 自动委派与结果汇总、GraphRAG 长期记忆仍处于设计阶段；A2A 的对等发现与各 Agent 消息端点已经落地，但“能够发现”不等同于“模型已经发起委派”。
+MCP 客户端与 GraphRAG 长期记忆仍处于设计阶段。A2A 的对等发现和消息委派已经落地：模型先通过 `discover_agents` 选择标准 Agent Card，再通过 `delegate_task` 使用官方 Client 发送任务，并对下游结果进行验收与汇总。
 
 ## 快速开始
 
@@ -47,7 +47,7 @@ pnpm start:ui
 
 ```text
 src/
-├── a2a/                  # A2A 1.0 共享类型与 Gexep 客户端
+├── a2a/                  # 官方 A2A 类型适配与 Gexep ClientFactory 客户端
 ├── backend/
 │   ├── A2A/               # A2A 对等目录、内部端点与公开 Gexep 服务
 │   ├── DeepSeek/          # 模型客户端、API 类型、Agent Loop 与具体 Agent
