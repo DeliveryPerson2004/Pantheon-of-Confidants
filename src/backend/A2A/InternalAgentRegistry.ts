@@ -1,85 +1,112 @@
+import {
+    A2A_PROTOCOL_VERSION,
+    Role,
+    TaskState,
+    type AgentCard,
+    type Message,
+    type SendMessageRequest,
+    type Task,
+} from "@a2a-js/sdk";
+import {
+    ClientFactory,
+    JsonRpcTransportFactory,
+} from "@a2a-js/sdk/client";
 import type {AgentEventListener} from "../DeepSeek/Agents/BaseAgent.ts";
-import {A2A_PROTOCOL_VERSION} from "../../a2a/types.ts";
+import {taskStateLabel, textFromMessage, textFromTask, textPart} from "../../a2a/types.ts";
+import {
+    buildGexepAgentCard,
+    buildPantheonAgentCard,
+} from "./AgentCards.ts";
+import type {DelegationTrace} from "./DelegationContext.ts";
 
 export interface A2AAgentHandle {
-    ask(input: string): Promise<string>;
+    ask(input: string, options?: {delegationTrace?: DelegationTrace}): Promise<string>;
     setEventListener(listener: AgentEventListener | undefined): void;
 }
 
-export interface InternalAgentSkill {
-    id: string;
-    name: string;
-    description: string;
-    tags: string[];
-    examples?: string[];
-}
-
-export interface InternalAgentProfile {
-    name: string;
-    description: string;
-    status: "available";
-    visibility: "public" | "internal";
-    protocolVersion: typeof A2A_PROTOCOL_VERSION;
+export interface RegisteredAgent {
     agentCardUrl: string;
-    rpcUrl: string;
-    supportedOperations: string[];
-    skills: InternalAgentSkill[];
+    card: AgentCard;
+    visibility: "public" | "internal";
+    agent: A2AAgentHandle;
 }
 
 export interface AgentDiscoveryResult {
     protocolVersion: typeof A2A_PROTOCOL_VERSION;
-    agents: InternalAgentProfile[];
+    agentCards: AgentCard[];
     total: number;
+}
+
+export interface AgentDelegationResult {
+    agentName: string;
+    contextId: string;
+    taskId?: string;
+    state?: string;
+    text: string;
 }
 
 export interface AgentDirectory {
     discover(capability?: string, requesterName?: string): AgentDiscoveryResult;
+    delegate(
+        requesterName: string,
+        targetName: string,
+        input: string,
+        contextId?: string,
+        trace?: DelegationTrace,
+    ): Promise<AgentDelegationResult>;
 }
-
-export interface RegisteredAgent {
-    profile: InternalAgentProfile;
-    agent: A2AAgentHandle;
-}
-
-const supportedOperations = [
-    "SendMessage",
-    "SendStreamingMessage",
-    "GetTask",
-    "ListTasks",
-];
 
 function normalized(value: string): string {
     return value.trim().toLocaleLowerCase();
 }
 
-function copyProfile(profile: InternalAgentProfile): InternalAgentProfile {
-    return structuredClone(profile);
+function createAuthenticatedFetch(fetchImplementation: typeof fetch, apiToken?: string): typeof fetch {
+    if (apiToken === undefined) {
+        return fetchImplementation;
+    }
+    return async (input, init = {}) => {
+        const headers = new Headers(init.headers);
+        headers.set("Authorization", `Bearer ${apiToken}`);
+        return fetchImplementation(input, {...init, headers});
+    };
 }
 
 export const emptyAgentDirectory: AgentDirectory = {
     discover: () => ({
         protocolVersion: A2A_PROTOCOL_VERSION,
-        agents: [],
+        agentCards: [],
         total: 0,
     }),
+    delegate: async () => {
+        throw new Error("当前运行时没有可用的 A2A Agent 目录。");
+    },
 };
 
 export class InternalAgentRegistry implements AgentDirectory {
     private readonly registrations = new Map<string, RegisteredAgent>();
+    private readonly clientFactory: ClientFactory;
 
-    register(profile: Omit<InternalAgentProfile, "status" | "protocolVersion" | "supportedOperations">, agent: A2AAgentHandle): void {
-        const key = normalized(profile.name);
+    constructor(apiToken?: string, fetchImplementation?: typeof fetch) {
+        const transportFetch = createAuthenticatedFetch(fetchImplementation ?? fetch, apiToken);
+        this.clientFactory = new ClientFactory({
+            transports: [new JsonRpcTransportFactory({fetchImpl: transportFetch})],
+        });
+    }
+
+    register(
+        card: AgentCard,
+        agentCardUrl: string,
+        visibility: RegisteredAgent["visibility"],
+        agent: A2AAgentHandle,
+    ): void {
+        const key = normalized(card.name);
         if (this.registrations.has(key)) {
-            throw new Error(`Agent ${profile.name} 已经注册。`);
+            throw new Error(`Agent ${card.name} 已经注册。`);
         }
-
         this.registrations.set(key, {
-            profile: {
-                ...structuredClone(profile),
-                status: "available",
-                protocolVersion: A2A_PROTOCOL_VERSION,
-                supportedOperations: [...supportedOperations],
-            },
+            agentCardUrl,
+            card: structuredClone(card),
+            visibility,
             agent,
         });
     }
@@ -87,39 +114,122 @@ export class InternalAgentRegistry implements AgentDirectory {
     discover(capability?: string, requesterName?: string): AgentDiscoveryResult {
         const query = capability === undefined ? undefined : normalized(capability);
         const requester = requesterName === undefined ? undefined : normalized(requesterName);
-        const agents = [...this.registrations.entries()]
+        const agentCards = [...this.registrations.entries()]
             .filter(([key]) => key !== requester)
-            .map(([, registration]) => registration.profile)
-            .filter((profile) => {
-                if (query === undefined) {
-                    return true;
-                }
-                const searchable = [
-                    profile.name,
-                    profile.description,
-                    ...profile.skills.flatMap((skill) => [
-                        skill.id,
-                        skill.name,
-                        skill.description,
-                        ...skill.tags,
-                    ]),
-                ].join("\n").toLocaleLowerCase();
-                return searchable.includes(query);
-            })
+            .map(([, registration]) => registration.card)
+            .filter((card) => query === undefined || this.matchesCapability(card, query))
             .sort((left, right) => left.name.localeCompare(right.name))
-            .map(copyProfile);
+            .map((card) => structuredClone(card));
 
         return {
             protocolVersion: A2A_PROTOCOL_VERSION,
-            agents,
-            total: agents.length,
+            agentCards,
+            total: agentCards.length,
         };
     }
 
-    entries(visibility?: InternalAgentProfile["visibility"]): RegisteredAgent[] {
+    async delegate(
+        requesterName: string,
+        targetName: string,
+        input: string,
+        contextId?: string,
+        trace?: DelegationTrace,
+    ): Promise<AgentDelegationResult> {
+        const requester = normalized(requesterName);
+        const target = normalized(targetName);
+        if (requester === target) {
+            throw new Error("Agent 不能通过 A2A 将任务委派给自己。");
+        }
+        const registration = this.registrations.get(target);
+        if (registration === undefined) {
+            throw new Error(`未发现名为 ${targetName} 的 A2A Agent。`);
+        }
+
+        const path = trace?.path ?? [requesterName];
+        if (path.some((name) => normalized(name) === target)) {
+            throw new Error(`检测到循环委派：${[...path, registration.card.name].join(" -> ")}`);
+        }
+        if (path.length >= 4) {
+            throw new Error("A2A 委派深度已达到上限 4。请由当前 Agent 汇总已有结果。");
+        }
+        const delegationTrace: DelegationTrace = {
+            traceId: trace?.traceId ?? crypto.randomUUID(),
+            path: [...path, registration.card.name],
+        };
+
+        const request: SendMessageRequest = {
+            tenant: "",
+            message: {
+                messageId: crypto.randomUUID(),
+                contextId: contextId ?? "",
+                taskId: "",
+                role: Role.ROLE_USER,
+                parts: [textPart(input)],
+                metadata: {pantheonDelegation: delegationTrace},
+                extensions: [],
+                referenceTaskIds: [],
+            },
+            configuration: {
+                acceptedOutputModes: ["text/markdown", "text/plain"],
+                taskPushNotificationConfig: undefined,
+                returnImmediately: false,
+            },
+            metadata: {pantheonDelegation: delegationTrace},
+        };
+
+        const client = await this.clientFactory.createFromAgentCard(registration.card);
+        const result = await client.sendMessage(request, {
+            signal: AbortSignal.timeout(120_000),
+        });
+        return this.delegationResult(registration.card.name, result);
+    }
+
+    entries(visibility?: RegisteredAgent["visibility"]): RegisteredAgent[] {
         return [...this.registrations.values()]
-            .filter(({profile}) => visibility === undefined || profile.visibility === visibility)
-            .map(({profile, agent}) => ({profile: copyProfile(profile), agent}));
+            .filter((registration) => visibility === undefined || registration.visibility === visibility)
+            .map((registration) => ({
+                ...registration,
+                card: structuredClone(registration.card),
+            }));
+    }
+
+    private matchesCapability(card: AgentCard, query: string): boolean {
+        const searchable = [
+            card.name,
+            card.description,
+            ...card.skills.flatMap((skill) => [
+                skill.id,
+                skill.name,
+                skill.description,
+                ...skill.tags,
+            ]),
+        ].join("\n").toLocaleLowerCase();
+        return searchable.includes(query);
+    }
+
+    private delegationResult(agentName: string, result: Message | Task): AgentDelegationResult {
+        if ("messageId" in result) {
+            return {
+                agentName,
+                contextId: result.contextId,
+                text: textFromMessage(result),
+            };
+        }
+
+        const state = result.status?.state ?? TaskState.TASK_STATE_UNSPECIFIED;
+        if (state === TaskState.TASK_STATE_FAILED || state === TaskState.TASK_STATE_REJECTED) {
+            const detail = result.status?.message === undefined
+                ? ""
+                : textFromMessage(result.status.message);
+            throw new Error(detail || `${agentName} 的 A2A 任务执行失败。`);
+        }
+        return {
+            agentName,
+            contextId: result.contextId,
+            taskId: result.id,
+            state: taskStateLabel(state),
+            text: textFromTask(result),
+        };
     }
 }
 
@@ -133,6 +243,7 @@ export interface PantheonAgentSet {
 export interface PantheonAgentUrls {
     publicBaseUrl: string;
     internalBaseUrl: string;
+    apiToken?: string;
 }
 
 export function registerPantheonAgents(
@@ -140,66 +251,63 @@ export function registerPantheonAgents(
     agents: PantheonAgentSet,
     urls: PantheonAgentUrls,
 ): void {
-    const publicBaseUrl = new URL(urls.publicBaseUrl);
-    const internalBaseUrl = new URL(urls.internalBaseUrl);
-    const internalUrls = (name: string) => {
-        const prefix = `/agents/${name.toLocaleLowerCase()}`;
-        return {
-            agentCardUrl: new URL(`${prefix}/.well-known/agent-card.json`, internalBaseUrl).toString(),
-            rpcUrl: new URL(`${prefix}/a2a`, internalBaseUrl).toString(),
-        };
-    };
+    const publicCard = buildGexepAgentCard(urls.publicBaseUrl, urls.apiToken);
+    registry.register(
+        publicCard,
+        new URL("/.well-known/agent-card.json", urls.publicBaseUrl).toString(),
+        "public",
+        agents.Gexep,
+    );
 
-    registry.register({
-        name: "Gexep",
-        description: "Pantheon 的公开入口与协调 Agent，可理解请求并执行已授权的邮件操作。",
-        visibility: "public",
-        agentCardUrl: new URL("/.well-known/agent-card.json", publicBaseUrl).toString(),
-        rpcUrl: new URL("/a2a", publicBaseUrl).toString(),
-        skills: [{
-            id: "gexep-conversation",
-            name: "Conversation and coordination",
-            description: "理解目标、协调处理并执行已授权的邮件操作。",
-            tags: ["conversation", "coordination", "email"],
-        }],
-    }, agents.Gexep);
+    const definitions = [
+        {
+            name: "Jezeh",
+            description: "负责云端 Markdown 备忘录的创建、检索、编辑与下载。",
+            skills: [{
+                id: "memo-management",
+                name: "Memo management",
+                description: "在隔离环境中管理 Markdown 备忘录。",
+                tags: ["memo", "markdown", "notes", "备忘录"],
+            }],
+            agent: agents.Jezeh,
+        },
+        {
+            name: "Lexey",
+            description: "语言、翻译、写作、资料检索与技能驱动的知识 Agent。",
+            skills: [{
+                id: "language-research",
+                name: "Language and research",
+                description: "处理翻译、润色、写作和联网资料检索。",
+                tags: ["language", "translation", "writing", "research", "翻译"],
+            }],
+            agent: agents.Lexey,
+        },
+        {
+            name: "Zebeh",
+            description: "通用分析与联网检索 Agent。",
+            skills: [{
+                id: "general-research",
+                name: "General research",
+                description: "执行通用分析与联网信息检索。",
+                tags: ["analysis", "research", "web", "检索"],
+            }],
+            agent: agents.Zebeh,
+        },
+    ] as const;
 
-    registry.register({
-        name: "Jezeh",
-        description: "负责云端 Markdown 备忘录的创建、检索、编辑与下载。",
-        visibility: "internal",
-        ...internalUrls("Jezeh"),
-        skills: [{
-            id: "memo-management",
-            name: "Memo management",
-            description: "在隔离环境中管理 Markdown 备忘录。",
-            tags: ["memo", "markdown", "notes", "备忘录"],
-        }],
-    }, agents.Jezeh);
-
-    registry.register({
-        name: "Lexey",
-        description: "语言、翻译、写作、资料检索与技能驱动的知识 Agent。",
-        visibility: "internal",
-        ...internalUrls("Lexey"),
-        skills: [{
-            id: "language-research",
-            name: "Language and research",
-            description: "处理翻译、润色、写作和联网资料检索。",
-            tags: ["language", "translation", "writing", "research", "翻译"],
-        }],
-    }, agents.Lexey);
-
-    registry.register({
-        name: "Zebeh",
-        description: "通用分析与联网检索 Agent。",
-        visibility: "internal",
-        ...internalUrls("Zebeh"),
-        skills: [{
-            id: "general-research",
-            name: "General research",
-            description: "执行通用分析与联网信息检索。",
-            tags: ["analysis", "research", "web", "检索"],
-        }],
-    }, agents.Zebeh);
+    for (const definition of definitions) {
+        const prefix = `/agents/${definition.name.toLocaleLowerCase()}`;
+        const card = buildPantheonAgentCard({
+            name: definition.name,
+            description: definition.description,
+            rpcUrl: new URL(`${prefix}/a2a`, urls.internalBaseUrl).toString(),
+            skills: definition.skills.map((skill) => ({...skill, tags: [...skill.tags]})),
+        });
+        registry.register(
+            card,
+            new URL(`${prefix}/.well-known/agent-card.json`, urls.internalBaseUrl).toString(),
+            "internal",
+            definition.agent,
+        );
+    }
 }

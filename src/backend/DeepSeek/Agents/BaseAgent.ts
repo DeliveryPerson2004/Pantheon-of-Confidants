@@ -19,6 +19,7 @@ import {
     type AgentDirectory,
     emptyAgentDirectory,
 } from "../../A2A/InternalAgentRegistry.ts";
+import type {DelegationTrace} from "../../A2A/DelegationContext.ts";
 
 export type AgentEvent =
     | {type: "start"; agentName: string}
@@ -46,6 +47,7 @@ export abstract class BaseAgent{
     private modelClient: ModelClient;
     private eventListener: AgentEventListener | undefined;
     private readonly agentDirectory: AgentDirectory;
+    private delegationTrace: DelegationTrace | undefined;
 
     protected readonly agentId: number;
     protected readonly agentName: string;
@@ -64,7 +66,7 @@ export abstract class BaseAgent{
             {
                 type: "function",
                 name: "discover_agents",
-                description: "通过运行时 A2A 目录发现其他在线 Agent。返回对方的职责、技能、Agent Card URL、A2A 消息端点和支持的操作；结果自动排除当前 Agent，可按能力关键词筛选。",
+                description: "通过运行时 A2A 目录发现其他在线 Agent。返回符合 A2A 官方结构的 Agent Card；结果自动排除当前 Agent，可按能力关键词筛选。",
                 parameters: {
                     type: "object",
                     properties: {
@@ -74,6 +76,29 @@ export abstract class BaseAgent{
                         },
                     },
                     required: [],
+                },
+            },
+            {
+                type: "function",
+                name: "delegate_task",
+                description: "通过 A2A 协议把一个边界清晰的子任务发送给已发现的 Agent，并取得对方返回的消息或任务结果。调用前应先用 discover_agents 确认目标及其技能。",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        targetAgent: {
+                            type: "string",
+                            description: "目标 Agent Card 中的 name，例如 Jezeh、Lexey 或 Zebeh。",
+                        },
+                        task: {
+                            type: "string",
+                            description: "交给目标 Agent 的完整任务描述，应包含完成任务所需上下文。",
+                        },
+                        contextId: {
+                            type: "string",
+                            description: "可选。延续此前与目标 Agent 的 A2A 上下文时传入。",
+                        },
+                    },
+                    required: ["targetAgent", "task"],
                 },
             },
         ];
@@ -167,7 +192,7 @@ export abstract class BaseAgent{
     protected abstract requestFunctionCall(inputFunctionCallItem: InputFunctionCallItem): Promise<void>;
 
     protected async requestFunctionCallWithCommonTools(inputFunctionCallItem: InputFunctionCallItem): Promise<void> {
-        if (inputFunctionCallItem.name !== "discover_agents") {
+        if (inputFunctionCallItem.name !== "discover_agents" && inputFunctionCallItem.name !== "delegate_task") {
             await this.requestFunctionCall(inputFunctionCallItem);
             return;
         }
@@ -178,8 +203,44 @@ export abstract class BaseAgent{
         } catch {
             this.createFunctionCallOutputItemAndPush(
                 inputFunctionCallItem,
-                "discover_agents 参数解析失败：arguments 不是合法的 JSON。",
+                `${inputFunctionCallItem.name} 参数解析失败：arguments 不是合法的 JSON。`,
             );
+            return;
+        }
+
+        if (inputFunctionCallItem.name === "delegate_task") {
+            const result = z.object({
+                targetAgent: z.string().trim().min(1),
+                task: z.string().trim().min(1),
+                contextId: z.string().trim().min(1).optional(),
+            }).safeParse(parsedArguments);
+            if (!result.success) {
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    `delegate_task 参数校验失败：${result.error.message}`,
+                );
+                return;
+            }
+
+            try {
+                const delegation = await this.agentDirectory.delegate(
+                    this.agentName,
+                    result.data.targetAgent,
+                    result.data.task,
+                    result.data.contextId,
+                    this.delegationTrace,
+                );
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    JSON.stringify(delegation),
+                );
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.createFunctionCallOutputItemAndPush(
+                    inputFunctionCallItem,
+                    `A2A 委派失败：${message}`,
+                );
+            }
             return;
         }
 
@@ -213,11 +274,19 @@ export abstract class BaseAgent{
         this.emit({type: "function_result", name: inputFunctionCallItem.name, output});
     }
 
-    public async ask(userInput: string): Promise<string> {
+    public async ask(
+        userInput: string,
+        options: {delegationTrace?: DelegationTrace} = {},
+    ): Promise<string> {
         logger.info("class BaseAgent public loop() start");
 
         const inputLengthBeforeLoop = this.input.length;
         const answerParts: string[] = [];
+        const previousDelegationTrace = this.delegationTrace;
+        this.delegationTrace = options.delegationTrace ?? {
+            traceId: crypto.randomUUID(),
+            path: [this.agentName],
+        };
 
         this.createInputMessageItemAndPush(userInput);
         this.emit({type: "start", agentName: this.agentName});
@@ -278,6 +347,8 @@ export abstract class BaseAgent{
             const normalizedError = error instanceof Error ? error : new Error(String(error));
             this.emit({type: "error", error: normalizedError});
             throw normalizedError;
+        } finally {
+            this.delegationTrace = previousDelegationTrace;
         }
     }
 }

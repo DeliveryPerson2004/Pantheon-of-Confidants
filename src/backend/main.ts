@@ -34,7 +34,7 @@ if (internalPort === port && (host === internalHost || host === "0.0.0.0" || hos
 const publicBaseUrl = process.env.PANTHEON_PUBLIC_URL || `http://127.0.0.1:${port}`;
 const internalBaseUrl = `http://${internalHost}:${internalPort}`;
 const apiToken = process.env.PANTHEON_API_TOKEN || undefined;
-const internalAgentRegistry = new InternalAgentRegistry();
+const internalAgentRegistry = new InternalAgentRegistry(apiToken);
 const gexep = new GexepAgent(internalAgentRegistry);
 const jezeh = new JezehAgent(undefined, undefined, internalAgentRegistry);
 const lexey = new LexeyAgent(internalAgentRegistry);
@@ -42,7 +42,9 @@ const zebeh = new ZebehAgent(internalAgentRegistry);
 registerPantheonAgents(
     internalAgentRegistry,
     {Gexep: gexep, Jezeh: jezeh, Lexey: lexey, Zebeh: zebeh},
-    {publicBaseUrl, internalBaseUrl},
+    apiToken === undefined
+        ? {publicBaseUrl, internalBaseUrl}
+        : {publicBaseUrl, internalBaseUrl, apiToken},
 );
 
 const app = createGexepA2AApp(
