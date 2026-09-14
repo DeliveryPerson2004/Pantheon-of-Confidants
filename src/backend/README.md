@@ -2,7 +2,7 @@
 
 > 项目定位、命名故事和快速概览见 [根目录 README](../../README.md)。本文只说明后端的实际结构、运行方式与当前边界；设计层面的观点集中记录在 [THINKING.md](THINKING.md)。
 
-后端基于 DeepSeek `/responses` API 构建，并通过 A2A 1.0 只公开 Gexep。四个已实现 Agent 都注册自己的 A2A 身份和消息端点，`BaseAgent` 为它们统一提供对等发现能力；非 Gexep 端点固定绑定回环地址。具体 Agent 负责角色指令和专属工具，`BaseAgent` 负责对话循环、共同发现工具与历史持久化，`ModelClient` 负责模型 HTTP 请求。终端 UI 已移出后端进程，通过公开 Agent Card 调用 Gexep。
+后端基于 DeepSeek `/responses` API 构建，并通过 A2A 1.0 只公开 Gexep。四个已实现 Agent 都注册标准 Agent Card 和消息端点，`BaseAgent` 为它们统一提供发现与委派工具；非 Gexep 端点固定绑定回环地址。A2A 协议层使用官方 `@a2a-js/sdk`，具体 Agent 负责角色指令和专属工具，`ModelClient` 负责模型 HTTP 请求。终端 UI 已移出后端进程，通过公开 Agent Card 调用 Gexep。
 
 ## 1. 技术栈
 
@@ -11,7 +11,7 @@
 | 语言与模块 | TypeScript 7、ESM | 严格类型检查，源码使用 `.ts` 扩展名导入 |
 | 运行与包管理 | tsx、pnpm | 直接运行 TypeScript，并通过 `tsc --noEmit` 检查类型 |
 | 模型接口 | DeepSeek `/responses`、原生 `fetch` | 保留 provider 特有的请求字段和输出项，不依赖模型 SDK |
-| Agent 协议 | A2A 1.0、JSON-RPC、SSE | 发布 Agent Card，发现对等 Agent，交换任务、状态与 Artifact |
+| Agent 协议 | `@a2a-js/sdk`、A2A 1.0、JSON-RPC、SSE | 用官方 Server/Client 抽象发布 Card、发现伙伴和交换 Task/Artifact |
 | 参数校验 | Zod | 在运行时校验 function tool 的入参 |
 | 持久化 | better-sqlite3 | 以单文件 `database.db` 保存 Agent 与消息历史 |
 | HTTP 服务 | Express 5 | 承载公开 Gexep 入口和仅回环可达的内部 Agent 端点 |
@@ -25,14 +25,16 @@
 ```text
 src/backend/
 ├── A2A/
-│   ├── GexepA2AServer.ts         # Agent Card、JSON-RPC/SSE、任务存储与校验
+│   ├── AgentCards.ts              # Gexep 与内部 Agent 的标准 Agent Card
+│   ├── DelegationContext.ts       # 内部委派路径与循环保护 metadata
+│   ├── GexepA2AServer.ts          # 官方 Executor、RequestHandler、TaskStore 与 Express handler
 │   ├── InternalA2AServer.ts       # Jezeh、Lexey、Zebeh 的回环 A2A 路由
-│   ├── InternalAgentRegistry.ts   # 四个 Agent 的动态目录与能力发现
+│   ├── InternalAgentRegistry.ts   # 受控 Card 目录与官方 A2A Client 委派
 │   └── README.md                 # 公开协议、示例与安全边界
 ├── DeepSeek/
 │   ├── API/responses.ts          # 请求和响应的 TypeScript 类型契约
 │   ├── Agents/
-│   │   ├── BaseAgent.ts          # 对话循环、共同发现工具、工具回填和历史持久化
+│   │   ├── BaseAgent.ts          # 对话循环、共同发现/委派工具、工具回填和历史持久化
 │   │   ├── Gexep/                # 入口 Agent；已接入邮件工具
 │   │   ├── Jezeh/                # 备忘录 Agent；已接入 E2B 与下载工具
 │   │   ├── Lexey/                # 语言 Agent；已接入网页搜索与 Skill
@@ -65,9 +67,10 @@ src/backend/
 终端 UI 或其他 A2A Client
   → 获取 Gexep Agent Card
   → 使用 A2A-Version: 1.0 调用 /a2a
-  → A2A 层校验 JSON-RPC、Message 与内容类型，创建 Task
-  → Gexep 加载角色指令、专属工具和共同的 discover_agents
+  → 官方 DefaultRequestHandler 校验协议并创建 Task
+  → Gexep 加载角色指令、专属工具和共同的 discover_agents / delegate_task
   → 需要了解伙伴时，从运行时目录获取其 Agent Card、能力与 RPC 地址
+  → 需要专业协作时，ClientFactory 根据目标 Card 调用其 A2A 端点
   → BaseAgent 调用 ModelClient
   → DeepSeek 返回 message / reasoning / function_call / web_search_call
   → function_call 由具体 Agent 校验并分发给对应工具
@@ -142,9 +145,9 @@ pnpm start:ui # 另一个终端
 
 当前仍有以下边界：
 
-- 四个 Agent 已能发现彼此，并且都具备 A2A 消息端点；模型侧的跨 Agent 发送、下游 Task 跟踪与结果汇总工具尚未实现。
+- 四个 Agent 已能发现彼此，并通过 `delegate_task` 调用官方 A2A Client 发送子任务；当前委派采用等待最终 Task 的同步模式，尚未实现多目标并行调度与持久化下游 Task 恢复。
 - 对外没有 Jezeh、Lexey、Zebeh 的 Agent Card 或 API；旧版 UI 的直接角色切换已经移除。
-- A2A Task 暂存内存，`CancelTask` 因底层 Agent Loop 暂不支持中断而返回标准的不可取消错误。
+- A2A Task 暂存内存；`CancelTask` 会标记任务取消，但底层 Agent Loop 尚未贯穿 `AbortSignal`，因此不能立即停止已经发出的模型或工具请求。
 - MCP 客户端尚未实现，第三方工具仍需以本地 function tool 直接集成。
 - GraphRAG 和跨 Agent 的长期记忆尚未实现；SQLite 历史只用于恢复原始上下文。
 - Zebeh 目前只有角色与基础 Agent 实现，专门的测试、审核工具仍待补充。
