@@ -207,6 +207,9 @@ importers:
 
   .:
     dependencies:
+      '@a2a-js/sdk':
+        specifier: ^1.1.0
+        version: 1.1.0(@bufbuild/protobuf@2.14.1)(express@5.2.1)
       '@earendil-works/pi-tui':
         specifier: ^0.85.1
         version: 0.85.1
@@ -255,6 +258,21 @@ importers:
         version: 7.0.2
 
 packages:
+
+  '@a2a-js/sdk@1.1.0':
+    resolution: {integrity: sha512-/Mhzw9C6VW7pFbY2Rq0pnrjT0Fy9PV0c46A7Gx1ppRlYq2u/6OV/bNRIoVBKChb8UZ8bE0WzzCc0pIr2CdmG+w==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@bufbuild/protobuf': ^2.10.2
+      '@grpc/grpc-js': ^1.11.0
+      express: ^4.21.2 || ^5.1.0
+    peerDependenciesMeta:
+      '@bufbuild/protobuf':
+        optional: true
+      '@grpc/grpc-js':
+        optional: true
+      express:
+        optional: true
 
   '@bufbuild/protobuf@2.14.1':
     resolution: {integrity: sha512-agRJn3+EJDUe8AvxTx/LnHA/GErvLE62pSaSk7+MwFOtOv8eWBu/qCq2qoZjBjVZ3C2aiFJCveuSs17KMkYGOw==}
@@ -807,6 +825,9 @@ packages:
   is-promise@4.0.0:
     resolution: {integrity: sha512-hvpoI6korhJMnej285dSg6nu1+e6uxs7zG3BYAm5byqDsgJNWwxzM6z6iZiAgQR4TJ30JmBTOwqZUw3WlyH3AQ==}
 
+  jose@6.2.12:
+    resolution: {integrity: sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==}
+
   joycon@3.1.1:
     resolution: {integrity: sha512-34wB/Y7MW7bzjKRjUKTa46I2Z7eV62Rkhva+KkopW7Qvv/OSWBqvkSY7vusOPrNuZcUG3tApvdVgNB8POj3SPw==}
     engines: {node: '>=10'}
@@ -1069,6 +1090,13 @@ packages:
     resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
 
 snapshots:
+
+  '@a2a-js/sdk@1.1.0(@bufbuild/protobuf@2.14.1)(express@5.2.1)':
+    dependencies:
+      jose: 6.2.12
+    optionalDependencies:
+      '@bufbuild/protobuf': 2.14.1
+      express: 5.2.1
 
   '@bufbuild/protobuf@2.14.1': {}
 
@@ -1536,6 +1564,8 @@ snapshots:
   ipaddr.js@1.9.1: {}
 
   is-promise@4.0.0: {}
+
+  jose@6.2.12: {}
 
   joycon@3.1.1: {}
 
