@@ -16,11 +16,13 @@ RUN pnpm install --frozen-lockfile
 
 RUN cp ./.env.example ./.env
 
-RUN pnpm exec prisma migrate deploy
-
-RUN pnpm exec prisma generate
+RUN pnpm exec tsc --noEmit
 
 RUN pnpm prune --prod
+
+ENV PANTHEON_HOST=0.0.0.0
+
+EXPOSE 3000
 
 ENTRYPOINT ["pnpm", "run", "start"]
 

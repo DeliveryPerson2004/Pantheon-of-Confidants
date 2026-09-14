@@ -1,50 +1,76 @@
-process.env.PANTHEON_TUI = "1";
+import "dotenv/config";
+import {createServer} from "node:http";
+import {createGexepA2AApp} from "./A2A/GexepA2AServer.ts";
+import {createInternalA2AApp} from "./A2A/InternalA2AServer.ts";
+import {
+    InternalAgentRegistry,
+    registerPantheonAgents,
+} from "./A2A/InternalAgentRegistry.ts";
+import {logger} from "./logger.ts";
 
 await import("./database/initDatabase.ts");
-
-const [
-    {GexepAgent},
-    {JezehAgent},
-    {LexeyAgent},
-    {ZebehAgent},
-    {PantheonApp},
-] = await Promise.all([
+const [{GexepAgent}, {JezehAgent}, {LexeyAgent}, {ZebehAgent}] = await Promise.all([
     import("./DeepSeek/Agents/Gexep/GexepAgent.ts"),
     import("./DeepSeek/Agents/Jezeh/JezehAgent.ts"),
     import("./DeepSeek/Agents/Lexey/LexeyAgent.ts"),
     import("./DeepSeek/Agents/Zebeh/ZebehAgent.ts"),
-    import("../ui/PantheonApp.ts"),
 ]);
 
-if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("Pantheon UI 需要在交互式终端中运行。");
+const host = process.env.PANTHEON_HOST || "127.0.0.1";
+const port = Number.parseInt(process.env.PANTHEON_PORT || "3000", 10);
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("PANTHEON_PORT 必须是 1 到 65535 之间的整数。");
 }
 
-const app = new PantheonApp([
-    {
-        name: "Gexep",
-        title: "入口与协调者",
-        description: "理解你的目标，并在授权后发送邮件。",
-        agent: new GexepAgent(),
-    },
-    {
-        name: "Jezeh",
-        title: "备忘录管家",
-        description: "在隔离沙箱中记录、检索、整理和导出 Markdown 备忘录。",
-        agent: new JezehAgent(),
-    },
-    {
-        name: "Lexey",
-        title: "语言伙伴",
-        description: "处理多语言学习、文本理解与表达任务。",
-        agent: new LexeyAgent(),
-    },
-    {
-        name: "Zebeh",
-        title: "行为验证者",
-        description: "用于开发阶段的 Agent 行为验证与调试。",
-        agent: new ZebehAgent(),
-    },
-]);
+const internalHost = "127.0.0.1";
+const internalPort = Number.parseInt(process.env.PANTHEON_INTERNAL_PORT || "3001", 10);
+if (!Number.isInteger(internalPort) || internalPort < 1 || internalPort > 65535) {
+    throw new Error("PANTHEON_INTERNAL_PORT 必须是 1 到 65535 之间的整数。");
+}
+if (internalPort === port && (host === internalHost || host === "0.0.0.0" || host === "::")) {
+    throw new Error("PANTHEON_INTERNAL_PORT 不能与公开 A2A 服务使用同一监听端口。");
+}
 
-app.start();
+const publicBaseUrl = process.env.PANTHEON_PUBLIC_URL || `http://127.0.0.1:${port}`;
+const internalBaseUrl = `http://${internalHost}:${internalPort}`;
+const apiToken = process.env.PANTHEON_API_TOKEN || undefined;
+const internalAgentRegistry = new InternalAgentRegistry();
+const gexep = new GexepAgent(internalAgentRegistry);
+const jezeh = new JezehAgent(undefined, undefined, internalAgentRegistry);
+const lexey = new LexeyAgent(internalAgentRegistry);
+const zebeh = new ZebehAgent(internalAgentRegistry);
+registerPantheonAgents(
+    internalAgentRegistry,
+    {Gexep: gexep, Jezeh: jezeh, Lexey: lexey, Zebeh: zebeh},
+    {publicBaseUrl, internalBaseUrl},
+);
+
+const app = createGexepA2AApp(
+    gexep,
+    apiToken === undefined ? {publicBaseUrl} : {publicBaseUrl, apiToken},
+);
+const server = createServer(app);
+const internalServer = createServer(createInternalA2AApp(internalAgentRegistry));
+
+server.listen(port, host, () => {
+    logger.info({host, port, publicBaseUrl}, "Gexep A2A server started");
+});
+internalServer.listen(internalPort, internalHost, () => {
+    logger.info(
+        {host: internalHost, port: internalPort, agents: ["Jezeh", "Lexey", "Zebeh"]},
+        "Internal peer A2A server started",
+    );
+});
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+        for (const activeServer of [server, internalServer]) {
+            activeServer.close((error) => {
+                if (error !== undefined) {
+                    logger.error(error, "Failed to stop A2A server");
+                    process.exitCode = 1;
+                }
+            });
+        }
+    });
+}

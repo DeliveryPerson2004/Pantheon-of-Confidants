@@ -4,7 +4,9 @@
   "description": "",
   "scripts": {
     "start": "tsx src/backend/main.ts",
+    "start:ui": "tsx src/ui/main.ts",
     "dev:backend:main": "tsc --noEmit && tsx src/backend/main.ts",
+    "dev:ui": "tsc --noEmit && tsx src/ui/main.ts",
     "dev:backend:test": "tsx src/backend/test.ts",
     "dev:backend:initDatabase": "tsx src/backend/database/initDatabase.ts",
     "test": "node --import tsx --test test/**/*.ts"

@@ -2,7 +2,7 @@
 
 > 项目定位、命名故事和快速概览见 [根目录 README](../../README.md)。本文只说明后端的实际结构、运行方式与当前边界；设计层面的观点集中记录在 [THINKING.md](THINKING.md)。
 
-后端基于 DeepSeek `/responses` API 构建。具体 Agent 负责加载角色指令并声明工具，`BaseAgent` 负责对话循环与历史持久化，`ModelClient` 负责 HTTP 请求，工具层负责执行经过约束的本地或沙箱操作。
+后端基于 DeepSeek `/responses` API 构建，并通过 A2A 1.0 只公开 Gexep。四个已实现 Agent 都注册自己的 A2A 身份和消息端点，`BaseAgent` 为它们统一提供对等发现能力；非 Gexep 端点固定绑定回环地址。具体 Agent 负责角色指令和专属工具，`BaseAgent` 负责对话循环、共同发现工具与历史持久化，`ModelClient` 负责模型 HTTP 请求。终端 UI 已移出后端进程，通过公开 Agent Card 调用 Gexep。
 
 ## 1. 技术栈
 
@@ -11,9 +11,11 @@
 | 语言与模块 | TypeScript 7、ESM | 严格类型检查，源码使用 `.ts` 扩展名导入 |
 | 运行与包管理 | tsx、pnpm | 直接运行 TypeScript，并通过 `tsc --noEmit` 检查类型 |
 | 模型接口 | DeepSeek `/responses`、原生 `fetch` | 保留 provider 特有的请求字段和输出项，不依赖模型 SDK |
+| Agent 协议 | A2A 1.0、JSON-RPC、SSE | 发布 Agent Card，发现对等 Agent，交换任务、状态与 Artifact |
 | 参数校验 | Zod | 在运行时校验 function tool 的入参 |
 | 持久化 | better-sqlite3 | 以单文件 `database.db` 保存 Agent 与消息历史 |
-| 终端界面 | pi-tui | 全屏对话、Markdown 渲染、角色切换、滚动与输入补全 |
+| HTTP 服务 | Express 5 | 承载公开 Gexep 入口和仅回环可达的内部 Agent 端点 |
+| 终端界面 | pi-tui | 独立前端进程，通过 A2A 与 Gexep 对话 |
 | 沙箱 | E2B | 为 Jezeh 提供网络隔离的备忘录工作区 |
 | 邮件 | Nodemailer | 由 Gexep 通过固定 QQ SMTP 配置发送邮件 |
 | 日志与测试 | Pino、`node:test` | 统一日志和无额外测试框架的自动化测试 |
@@ -22,10 +24,15 @@
 
 ```text
 src/backend/
+├── A2A/
+│   ├── GexepA2AServer.ts         # Agent Card、JSON-RPC/SSE、任务存储与校验
+│   ├── InternalA2AServer.ts       # Jezeh、Lexey、Zebeh 的回环 A2A 路由
+│   ├── InternalAgentRegistry.ts   # 四个 Agent 的动态目录与能力发现
+│   └── README.md                 # 公开协议、示例与安全边界
 ├── DeepSeek/
 │   ├── API/responses.ts          # 请求和响应的 TypeScript 类型契约
 │   ├── Agents/
-│   │   ├── BaseAgent.ts          # 对话循环、工具回填和历史持久化
+│   │   ├── BaseAgent.ts          # 对话循环、共同发现工具、工具回填和历史持久化
 │   │   ├── Gexep/                # 入口 Agent；已接入邮件工具
 │   │   ├── Jezeh/                # 备忘录 Agent；已接入 E2B 与下载工具
 │   │   ├── Lexey/                # 语言 Agent；已接入网页搜索与 Skill
@@ -46,25 +53,33 @@ src/backend/
 │   ├── initDatabase.ts           # 建表并登记默认 Agent
 │   └── stmt.ts                   # prepared statements
 ├── logger.ts                     # Pino 日志封装
-├── main.ts                       # 初始化 Agent 并启动终端界面
+├── main.ts                       # 初始化 Gexep 并启动 A2A 服务
 └── test.ts                       # Jezeh 真实服务链路脚本
 ```
+
+共享的 A2A 数据类型和前端客户端位于 `src/a2a/`，终端入口位于 `src/ui/main.ts`；二者都不导入或实例化后端 Agent。
 
 ## 3. 请求链路
 
 ```text
-用户输入
-  → 具体 Agent 加载角色指令和工具清单
+终端 UI 或其他 A2A Client
+  → 获取 Gexep Agent Card
+  → 使用 A2A-Version: 1.0 调用 /a2a
+  → A2A 层校验 JSON-RPC、Message 与内容类型，创建 Task
+  → Gexep 加载角色指令、专属工具和共同的 discover_agents
+  → 需要了解伙伴时，从运行时目录获取其 Agent Card、能力与 RPC 地址
   → BaseAgent 调用 ModelClient
   → DeepSeek 返回 message / reasoning / function_call / web_search_call
   → function_call 由具体 Agent 校验并分发给对应工具
   → function_call_output 回填上下文，继续请求模型
   → 没有新的 function_call 时结束，并持久化本轮增量
+  → A2A 层将答案放入 Artifact，并返回最终 Task 或 SSE 事件
 ```
 
 这条链路的分工如下：
 
 - [`DeepSeek/`](DeepSeek/README.md) 负责模型协议、循环控制和 Agent 定制。
+- [`A2A/`](A2A/README.md) 负责公开 Gexep 边界、内部对等目录和回环端点；公开 Card 不暴露内部 Agent、reasoning 或工具参数。
 - [`Tools/`](Tools/README.md) 负责具体能力及其运行时边界，不负责模型通信。
 - `database/` 负责保存 Agent 元数据和已激活的消息记录。
 - `E2B/` 只负责 Jezeh Sandbox 的生命周期与文件访问适配。
@@ -89,16 +104,24 @@ pnpm dev:backend:initDatabase
 pnpm exec tsc --noEmit
 pnpm test
 pnpm start
+pnpm start:ui # 另一个终端
 ```
 
 | 环境变量 | 是否必需 | 用途 |
 | -------- | -------- | ---- |
 | `DEEPSEEK_API_KEY` | 调用 Agent 时必需 | 访问 DeepSeek `/responses` API |
+| `PANTHEON_HOST` / `PANTHEON_PORT` | 可选 | A2A 监听地址与端口，默认 `127.0.0.1:3000` |
+| `PANTHEON_INTERNAL_PORT` | 可选 | 内部对等 A2A 端口，默认 `3001`；监听地址固定为 `127.0.0.1` |
+| `PANTHEON_PUBLIC_URL` | 对外部署时必需 | 写入 Agent Card 的公开服务基址 |
+| `PANTHEON_API_TOKEN` | 建议对外部署时配置 | 保护 `/a2a` 的 Bearer Token |
+| `PANTHEON_A2A_CARD_URL` | UI 连接远端时配置 | 前端读取的 Gexep Agent Card 地址 |
 | `SMTP_PASS` | 使用 Gexep 邮件工具时必需 | QQ SMTP 授权码 |
 | `E2B_API_KEY` | 使用 Jezeh 时必需 | 创建或连接 E2B Sandbox |
 | `E2B_MEMO_SANDBOX_ID` | 可选 | 复用一个仍在运行或已暂停的 Sandbox |
 
-`pnpm start` 会初始化数据库并启动基于 pi-tui 的全屏交互界面；`pnpm dev:backend:main` 会先完成类型检查再启动。界面支持 `/agent <name>`、`/clear`、`/help`、`/quit`，并会按 Agent 恢复各自已激活的历史消息。`src/backend/test.ts` 会访问真实服务并向固定宿主机目录写入备忘录，仅应在配置完整且明确需要端到端验证时手动运行。
+`pnpm start` 会初始化数据库，启动公开 Gexep 服务，并在回环地址启动内部对等 A2A 服务；`pnpm start:ui` 启动独立终端客户端。后端从 SQLite 恢复各 Agent 的已激活历史，UI 只维护本次客户端进程的显示记录。A2A Task 当前保存在内存中，服务重启后不能继续查询旧 Task。协议方法、curl 示例和生产部署边界见 [A2A 说明](A2A/README.md)。
+
+`src/backend/test.ts` 会访问真实服务并向固定宿主机目录写入备忘录，仅应在配置完整且明确需要端到端验证时手动运行。
 
 ## 6. 自动化测试
 
@@ -107,6 +130,7 @@ pnpm start
 | 范围 | 测试文件 |
 | ---- | -------- |
 | Agent 构造、工具分发与循环 | `gexep-agent.test.ts`、`jezeh-agent.test.ts`、`lexey-agent.test.ts` |
+| A2A 卡片、任务、流、对等目录与前端客户端 | `a2a-gexep.test.ts`、`internal-agent-registry.test.ts` |
 | 工具行为与安全约束 | `send-email.test.ts`、`e2b-shell-execute.test.ts`、`download-memo.test.ts`、`load-skill.test.ts`、`load-instructions.test.ts`、`ask-developer.test.ts` |
 | 模型请求与持久化 | `model-client.test.ts`、`database.test.ts` |
 
@@ -118,7 +142,9 @@ pnpm start
 
 当前仍有以下边界：
 
-- Gexep 尚未接入 A2A，不能实际发现或调度其他 Agent。
+- 四个 Agent 已能发现彼此，并且都具备 A2A 消息端点；模型侧的跨 Agent 发送、下游 Task 跟踪与结果汇总工具尚未实现。
+- 对外没有 Jezeh、Lexey、Zebeh 的 Agent Card 或 API；旧版 UI 的直接角色切换已经移除。
+- A2A Task 暂存内存，`CancelTask` 因底层 Agent Loop 暂不支持中断而返回标准的不可取消错误。
 - MCP 客户端尚未实现，第三方工具仍需以本地 function tool 直接集成。
 - GraphRAG 和跨 Agent 的长期记忆尚未实现；SQLite 历史只用于恢复原始上下文。
 - Zebeh 目前只有角色与基础 Agent 实现，专门的测试、审核工具仍待补充。

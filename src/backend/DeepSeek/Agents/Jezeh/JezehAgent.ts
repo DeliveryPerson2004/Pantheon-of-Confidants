@@ -13,6 +13,7 @@ import {
 } from "../../../Tools/executeE2BShell.ts";
 import {selectIdFromAgentTableStmt} from "../../../database/stmt.ts";
 import path from "node:path";
+import {type AgentDirectory, emptyAgentDirectory} from "../../../A2A/InternalAgentRegistry.ts";
 
 const dirPath = import.meta.dirname;
 
@@ -26,6 +27,7 @@ export class JezehAgent extends BaseAgent {
     constructor(
         downloadMemoFunction: DownloadMemoFunction = downloadMemo,
         executeE2BShellFunction: ExecuteE2BShellFunction = executeE2BShell,
+        agentDirectory: AgentDirectory = emptyAgentDirectory,
     ) {
         const instructions = loadInstructions(dirPath);
         const agentName = path.basename(dirPath);
@@ -69,6 +71,7 @@ export class JezehAgent extends BaseAgent {
             instructions,
             agentId,
             funcTools,
+            agentDirectory,
         );
 
         this.downloadMemoFunction = downloadMemoFunction;

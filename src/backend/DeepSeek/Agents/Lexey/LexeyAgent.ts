@@ -6,12 +6,13 @@ import {
 } from "../../../database/stmt.ts";
 import {loadSkill, loadSkillInputSchema, type loadSkillInputType} from "../../../Tools/loadSkill.ts";
 import path from "node:path";
+import {type AgentDirectory, emptyAgentDirectory} from "../../../A2A/InternalAgentRegistry.ts";
 
 const dirPath = import.meta.dirname;
 const skillsDirPath = path.join(dirPath, "skills");
 
 export class LexeyAgent extends BaseAgent{
-    constructor() {
+    constructor(agentDirectory: AgentDirectory = emptyAgentDirectory) {
         const instructions = loadInstructions(dirPath, true);
         const agentName = path.basename(dirPath);
         const agentId = selectIdFromAgentTableStmt.get(agentName) as number;
@@ -44,6 +45,7 @@ export class LexeyAgent extends BaseAgent{
             instructions,
             agentId,
             funcTools,
+            agentDirectory,
         );
     }
 

@@ -12,24 +12,19 @@ import {
     truncateToWidth,
     visibleWidth,
 } from "@earendil-works/pi-tui";
-import type {
-    AgentEvent,
-    AgentEventListener,
-    ConversationMessage,
-} from "../backend/DeepSeek/Agents/BaseAgent.ts";
+import type {GexepClientEvent, GexepClientEventListener} from "../a2a/GexepA2AClient.ts";
 import {colors, editorTheme, markdownTheme} from "./theme.ts";
 
-export interface ChatAgent {
+export interface GexepClient {
     ask(input: string): Promise<string>;
-    getConversationHistory(): ConversationMessage[];
-    setEventListener(listener: AgentEventListener | undefined): void;
+    setEventListener(listener: GexepClientEventListener | undefined): void;
 }
 
-export interface AgentDefinition {
+export interface GexepDefinition {
     name: string;
     title: string;
     description: string;
-    agent: ChatAgent;
+    client: GexepClient;
 }
 
 type UiMessageRole = "user" | "assistant" | "notice" | "error";
@@ -54,30 +49,9 @@ class Header implements Component {
         }
 
         const title = colors.bold(colors.brightCyan(" PANTHEON OF CONFIDANTS "));
-        const subtitle = colors.muted(" 多智能体运行时 · 每一位 Agent，都是一位挚友 ");
+        const subtitle = colors.muted(" Gexep A2A 客户端 · 每一位 Agent，都是一位挚友 ");
         const divider = colors.dim("─".repeat(width));
-
         return [padToWidth(title, width), padToWidth(subtitle, width), divider];
-    }
-}
-
-class AgentTabs implements Component {
-    constructor(
-        private readonly definitions: AgentDefinition[],
-        private readonly getActiveIndex: () => number,
-    ) {}
-
-    invalidate(): void {}
-
-    render(width: number): string[] {
-        const tabs = this.definitions.map((definition, index) => {
-            const label = `${index + 1} ${definition.name}`;
-            return index === this.getActiveIndex()
-                ? colors.bold(colors.cyan(`● ${label}`))
-                : colors.muted(`○ ${label}`);
-        }).join(colors.dim("  │  "));
-
-        return [truncateToWidth(` ${tabs}`, width, "")];
     }
 }
 
@@ -100,9 +74,7 @@ class ConversationView implements Component {
             if (lines.length > 0) {
                 lines.push("");
             }
-
-            const label = this.renderLabel(message);
-            lines.push(truncateToWidth(` ${label}`, width, ""));
+            lines.push(truncateToWidth(` ${this.renderLabel(message)}`, width, ""));
 
             const defaultColor = message.role === "error"
                 ? colors.red
@@ -118,7 +90,6 @@ class ConversationView implements Component {
             );
             lines.push(...markdown.render(width));
         }
-
         return lines.length > 0 ? lines : [colors.muted("  暂无消息")];
     }
 
@@ -148,7 +119,6 @@ class ActivityLine implements Component {
     set(text: string, active = false): void {
         this.text = text;
         this.active = active;
-
         if (active && this.timer === undefined) {
             this.timer = setInterval(() => {
                 this.frame = (this.frame + 1) % this.frames.length;
@@ -195,25 +165,11 @@ export class PantheonApp {
     private readonly editor = new Editor(this.tui, editorTheme, {paddingX: 1});
     private readonly conversationView = new ConversationView();
     private readonly activityLine = new ActivityLine(() => this.tui.requestRender());
-    private readonly messagesByAgent = new Map<string, UiMessage[]>();
-    private activeIndex = 0;
+    private readonly messages: UiMessage[] = [];
     private busy = false;
     private stopped = false;
 
-    constructor(private readonly definitions: AgentDefinition[]) {
-        if (definitions.length === 0) {
-            throw new Error("PantheonApp 至少需要一个 Agent。");
-        }
-
-        for (const definition of definitions) {
-            const messages = definition.agent.getConversationHistory().map((message): UiMessage => (
-                message.role === "assistant"
-                    ? {role: "assistant", text: message.text, agentName: definition.name}
-                    : {role: "user", text: message.text}
-            ));
-            this.messagesByAgent.set(definition.name, messages);
-        }
-
+    constructor(private readonly definition: GexepDefinition) {
         const transcript = new ScrollView(this.conversationView, {
             follow: "end",
             primary: true,
@@ -223,11 +179,6 @@ export class PantheonApp {
         });
         const root = new VStack([
             {component: new Header(), basis: 3, shrink: 0},
-            {
-                component: new AgentTabs(this.definitions, () => this.activeIndex),
-                basis: 1,
-                shrink: 0,
-            },
             {component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1},
             {component: this.activityLine, basis: 1, shrink: 0},
             {component: this.editor, basis: "auto", shrink: 0, maxSize: 10},
@@ -236,8 +187,7 @@ export class PantheonApp {
         this.tui.setLayoutRoot(root);
         this.editor.setAutocompleteProvider(new CombinedAutocompleteProvider([
             {name: "help", description: "显示命令与快捷键"},
-            {name: "agent", description: "切换 Agent，例如 /agent Lexey"},
-            {name: "clear", description: "清空当前 Agent 的界面消息"},
+            {name: "clear", description: "清空当前界面消息"},
             {name: "quit", description: "退出 Pantheon"},
         ], process.cwd()));
         this.editor.onSubmit = (text) => {
@@ -250,13 +200,12 @@ export class PantheonApp {
                 return {consume: true};
             }
             if (matchesKey(data, Key.ctrl("l")) && !this.busy) {
-                this.clearCurrentConversation();
+                this.clearConversation();
                 return {consume: true};
             }
             return undefined;
         });
-
-        this.showActiveConversation();
+        this.showConversation();
     }
 
     start(): void {
@@ -270,26 +219,8 @@ export class PantheonApp {
         }
         this.stopped = true;
         this.activityLine.dispose();
-        for (const definition of this.definitions) {
-            definition.agent.setEventListener(undefined);
-        }
+        this.definition.client.setEventListener(undefined);
         this.tui.stop();
-    }
-
-    private get activeDefinition(): AgentDefinition {
-        const definition = this.definitions[this.activeIndex];
-        if (definition === undefined) {
-            throw new Error("当前 Agent 不存在。");
-        }
-        return definition;
-    }
-
-    private get activeMessages(): UiMessage[] {
-        const messages = this.messagesByAgent.get(this.activeDefinition.name);
-        if (messages === undefined) {
-            throw new Error(`找不到 ${this.activeDefinition.name} 的会话。`);
-        }
-        return messages;
     }
 
     private async submit(rawText: string): Promise<void> {
@@ -304,61 +235,44 @@ export class PantheonApp {
             return;
         }
 
-        const definition = this.activeDefinition;
-        const messages = this.activeMessages;
-        messages.push({role: "user", text});
-        this.conversationView.setMessages(messages);
+        this.messages.push({role: "user", text});
+        this.conversationView.setMessages(this.messages);
         this.setBusy(true);
-
-        definition.agent.setEventListener((event) => this.handleAgentEvent(definition, event));
+        this.definition.client.setEventListener((event) => this.handleAgentEvent(event));
         try {
-            await definition.agent.ask(text);
+            await this.definition.client.ask(text);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (!messages.some((item) => item.role === "error" && item.text === message)) {
-                messages.push({role: "error", text: message});
+            if (!this.messages.some((item) => item.role === "error" && item.text === message)) {
+                this.messages.push({role: "error", text: message});
             }
         } finally {
-            definition.agent.setEventListener(undefined);
+            this.definition.client.setEventListener(undefined);
             this.setBusy(false);
-            this.conversationView.setMessages(messages);
+            this.conversationView.setMessages(this.messages);
             this.tui.requestRender();
         }
     }
 
-    private handleAgentEvent(definition: AgentDefinition, event: AgentEvent): void {
-        const messages = this.messagesByAgent.get(definition.name);
-        if (messages === undefined) {
-            return;
-        }
-
+    private handleAgentEvent(event: GexepClientEvent): void {
         switch (event.type) {
             case "start":
-                this.activityLine.set(`${definition.name} 正在思考…`, true);
+                this.activityLine.set("正在连接 Gexep…", true);
                 break;
-            case "reasoning":
-                this.activityLine.set(`${definition.name} 正在梳理思路…`, true);
-                break;
-            case "function_call":
-                this.activityLine.set(`${definition.name} 正在${this.describeTool(event.name)}…`, true);
-                break;
-            case "function_result":
-                this.activityLine.set(`${this.describeTool(event.name)}完成，正在继续…`, true);
-                break;
-            case "web_search":
-                this.activityLine.set(`${definition.name} 正在搜索网页…`, true);
+            case "status":
+                this.activityLine.set(event.text, true);
                 break;
             case "message":
-                messages.push({role: "assistant", text: event.text, agentName: definition.name});
-                this.conversationView.setMessages(messages);
-                this.activityLine.set(`${definition.name} 正在完成回复…`, true);
+                this.messages.push({role: "assistant", text: event.text, agentName: this.definition.name});
+                this.conversationView.setMessages(this.messages);
+                this.activityLine.set(`${this.definition.name} 正在完成回复…`, true);
                 break;
             case "complete":
-                this.activityLine.set(`${definition.name} 已就绪`);
+                this.activityLine.set(`${this.definition.name} 已就绪`);
                 break;
             case "error":
-                messages.push({role: "error", text: event.error.message});
-                this.conversationView.setMessages(messages);
+                this.messages.push({role: "error", text: event.error.message});
+                this.conversationView.setMessages(this.messages);
                 this.activityLine.set("请求失败");
                 break;
         }
@@ -366,81 +280,51 @@ export class PantheonApp {
     }
 
     private handleCommand(commandLine: string): void {
-        const [command = "", ...args] = commandLine.slice(1).trim().split(/\s+/);
-
+        const [command = ""] = commandLine.slice(1).trim().split(/\s+/);
         switch (command.toLowerCase()) {
             case "help":
-                this.activeMessages.push({
+                this.messages.push({
                     role: "notice",
                     text: [
                         "**可用命令**",
                         "",
-                        "- `/agent <name>`：切换对话角色",
-                        "- `/clear`：清空当前界面中的消息（不会删除数据库历史）",
+                        "- `/clear`：清空当前客户端界面（不会删除后端历史）",
                         "- `/quit`：退出界面",
                         "- `Ctrl+L`：快速清屏",
                         "- `Ctrl+C`：退出界面",
-                        "",
-                        "可用角色：" + this.definitions.map((item) => `**${item.name}**`).join("、"),
                     ].join("\n"),
                 });
-                this.showActiveConversation();
-                break;
-            case "agent":
-                this.switchAgent(args.join(" "));
+                this.showConversation();
                 break;
             case "clear":
-                this.clearCurrentConversation();
+                this.clearConversation();
                 break;
             case "quit":
             case "exit":
                 this.stop();
                 break;
             default:
-                this.activeMessages.push({
+                this.messages.push({
                     role: "error",
                     text: `未知命令：/${command}。输入 \`/help\` 查看可用命令。`,
                 });
-                this.showActiveConversation();
+                this.showConversation();
         }
     }
 
-    private switchAgent(name: string): void {
-        const normalizedName = name.trim().toLowerCase();
-        const nextIndex = this.definitions.findIndex(
-            (definition) => definition.name.toLowerCase() === normalizedName,
-        );
-
-        if (nextIndex < 0) {
-            this.activeMessages.push({
-                role: "error",
-                text: name
-                    ? `找不到 Agent “${name}”。可用角色：${this.definitions.map((item) => item.name).join("、")}。`
-                    : `请指定 Agent，例如 \`/agent Lexey\`。`,
-            });
-            this.showActiveConversation();
-            return;
-        }
-
-        this.activeIndex = nextIndex;
-        this.showActiveConversation();
-        this.activityLine.set(`${this.activeDefinition.name} 已就绪`);
+    private clearConversation(): void {
+        this.messages.length = 0;
+        this.showConversation();
     }
 
-    private clearCurrentConversation(): void {
-        this.messagesByAgent.set(this.activeDefinition.name, []);
-        this.showActiveConversation();
-    }
-
-    private showActiveConversation(): void {
-        const messages = this.activeMessages;
-        if (messages.length === 0) {
-            messages.push({
+    private showConversation(): void {
+        if (this.messages.length === 0) {
+            this.messages.push({
                 role: "notice",
-                text: `你正在与 **${this.activeDefinition.name}** 对话。${this.activeDefinition.title}：${this.activeDefinition.description}`,
+                text: `你正在通过 A2A 与 **${this.definition.name}** 对话。${this.definition.title}：${this.definition.description}`,
             });
         }
-        this.conversationView.setMessages(messages);
+        this.conversationView.setMessages(this.messages);
         this.tui.requestRender();
     }
 
@@ -448,18 +332,8 @@ export class PantheonApp {
         this.busy = busy;
         this.editor.disableSubmit = busy;
         if (!busy) {
-            this.activityLine.set(`${this.activeDefinition.name} 已就绪`);
+            this.activityLine.set(`${this.definition.name} 已就绪`);
         }
         this.tui.requestRender();
-    }
-
-    private describeTool(name: string): string {
-        const labels: Record<string, string> = {
-            send_email: "发送邮件",
-            load_skill: "加载语言技能",
-            e2b_shell_execute: "整理云端备忘录",
-            download_memo: "下载备忘录",
-        };
-        return labels[name] ?? `调用 ${name}`;
     }
 }
