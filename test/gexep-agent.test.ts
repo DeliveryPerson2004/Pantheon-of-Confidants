@@ -9,6 +9,7 @@ import type {
     InputItemType,
 } from "../src/backend/DeepSeek/API/responses.ts";
 import type {SendEmailInputType} from "../src/backend/Tools/sendEmail.ts";
+import type {AgentDirectory} from "../src/backend/A2A/InternalAgentRegistry.ts";
 
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "deep-forge-test-"));
@@ -27,8 +28,11 @@ const dbAgentId = selectIdFromAgentTableStmt.get("Gexep") as number;
 class TestableGexepAgent extends GexepAgent {
     private readonly sendEmailFunction: (input: SendEmailInputType) => Promise<string>;
 
-    constructor(sendEmailFunction: (input: SendEmailInputType) => Promise<string> = async () => "邮件已发送") {
-        super();
+    constructor(
+        sendEmailFunction: (input: SendEmailInputType) => Promise<string> = async () => "邮件已发送",
+        agentDirectory?: AgentDirectory,
+    ) {
+        super(agentDirectory);
         this.sendEmailFunction = sendEmailFunction;
     }
 
@@ -45,7 +49,7 @@ class TestableGexepAgent extends GexepAgent {
     }
 
     public testRequestFunctionCall(item: InputFunctionCallItem): Promise<void> {
-        return this.requestFunctionCall(item);
+        return this.requestFunctionCallWithCommonTools(item);
     }
 
     protected override executeSendEmail(input: SendEmailInputType): Promise<string> {
@@ -147,6 +151,55 @@ describe("GexepAgent.requestFunctionCall()", () => {
 
         assert.equal(agent.getInput().length, before);
     });
+
+    it("discover_agents 返回运行时目录中的其他 Agent", async () => {
+        const directory: AgentDirectory = {
+            discover: (capability, requesterName) => ({
+                protocolVersion: "1.0",
+                agents: [{
+                    name: "Lexey",
+                    description: "语言伙伴",
+                    status: "available",
+                    visibility: "internal",
+                    protocolVersion: "1.0",
+                    agentCardUrl: "http://127.0.0.1:3001/agents/lexey/.well-known/agent-card.json",
+                    rpcUrl: "http://127.0.0.1:3001/agents/lexey/a2a",
+                    supportedOperations: ["SendMessage"],
+                    skills: [{
+                        id: "language",
+                        name: "Language",
+                        description: "翻译和润色",
+                        tags: ["translation"],
+                    }],
+                }],
+                total: capability === "translation" && requesterName === "Gexep" ? 1 : 0,
+            }),
+        };
+        const agent = new TestableGexepAgent(async () => "不应调用", directory);
+
+        await agent.testRequestFunctionCall(createFunctionCallItem(
+            "discover_agents",
+            JSON.stringify({capability: "translation"}),
+        ));
+
+        const output = JSON.parse(getLastOutputItem(agent.getInput()).output) as {
+            agents: Array<{name: string}>;
+            total: number;
+        };
+        assert.equal(output.agents[0]?.name, "Lexey");
+        assert.equal(output.total, 1);
+    });
+
+    it("discover_agents 参数不合法时返回校验错误", async () => {
+        const agent = new TestableGexepAgent();
+
+        await agent.testRequestFunctionCall(createFunctionCallItem(
+            "discover_agents",
+            JSON.stringify({capability: ""}),
+        ));
+
+        assert.match(getLastOutputItem(agent.getInput()).output, /参数校验失败/);
+    });
 });
 
 describe("GexepAgent 工具注册", () => {
@@ -176,7 +229,9 @@ describe("GexepAgent 工具注册", () => {
 
         const tools = capturedBody?.tools as Array<Record<string, unknown>>;
         const sendEmailTool = tools.find((tool) => tool.name === "send_email");
+        const discoverAgentsTool = tools.find((tool) => tool.name === "discover_agents");
         assert.ok(sendEmailTool !== undefined);
+        assert.ok(discoverAgentsTool !== undefined);
         assert.deepEqual(
             (sendEmailTool.parameters as {required: string[]}).required,
             ["senderName", "subject", "text"],

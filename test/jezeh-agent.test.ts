@@ -158,6 +158,7 @@ describe("JezehAgent 工具注册", () => {
         const downloadMemoTool = tools.find((tool) => tool.name === "download_memo");
         assert.ok(downloadMemoTool !== undefined);
         assert.ok(tools.some((tool) => tool.name === "e2b_shell_execute"));
+        assert.ok(tools.some((tool) => tool.name === "discover_agents"));
         assert.deepEqual(
             (downloadMemoTool.parameters as {required: string[]}).required,
             ["memoPath"],

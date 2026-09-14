@@ -3,13 +3,16 @@ import {type InputFunctionCallItem, ModelType, type ToolsType} from "../../API/r
 import {loadInstructions} from "../../../Tools/loadInstructions.ts";
 import {sendEmail, sendEmailInputSchema, type SendEmailInputType} from "../../../Tools/sendEmail.ts";
 import {selectIdFromAgentTableStmt} from "../../../database/stmt.ts";
+import {
+    type AgentDirectory,
+    emptyAgentDirectory,
+} from "../../../A2A/InternalAgentRegistry.ts";
 import path from "node:path";
 
 
 const dirPath = import.meta.dirname;
-
 export class GexepAgent extends BaseAgent {
-    constructor() {
+    constructor(agentDirectory: AgentDirectory = emptyAgentDirectory) {
         const instructions = loadInstructions(dirPath);
         const agentName = path.basename(dirPath);
         const agentId = selectIdFromAgentTableStmt.get(agentName) as number;
@@ -49,6 +52,7 @@ export class GexepAgent extends BaseAgent {
             instructions,
             agentId,
             funcTools,
+            agentDirectory,
         );
     }
 

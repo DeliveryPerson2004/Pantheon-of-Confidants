@@ -5,11 +5,12 @@ import {
     selectIdFromAgentTableStmt,
 } from "../../../database/stmt.ts";
 import path from "node:path";
+import {type AgentDirectory, emptyAgentDirectory} from "../../../A2A/InternalAgentRegistry.ts";
 
 const dirPath = import.meta.dirname;
 
 export class ZebehAgent extends BaseAgent{
-    constructor() {
+    constructor(agentDirectory: AgentDirectory = emptyAgentDirectory) {
         const instructions = loadInstructions(dirPath);
         const agentName = path.basename(dirPath);
         const agentId = selectIdFromAgentTableStmt.get(agentName) as number;
@@ -25,6 +26,7 @@ export class ZebehAgent extends BaseAgent{
             instructions,
             agentId,
             funcTools,
+            agentDirectory,
         );
     }
 

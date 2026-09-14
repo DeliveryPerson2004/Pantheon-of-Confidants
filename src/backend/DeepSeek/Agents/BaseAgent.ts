@@ -14,6 +14,11 @@ import {
     selectMaxTurnFromAgentTableStmt,
     selectMessageFromMessageTableStmt, selectNameFromAgentTableStmt
 } from "../../database/stmt.ts";
+import {z} from "zod";
+import {
+    type AgentDirectory,
+    emptyAgentDirectory,
+} from "../../A2A/InternalAgentRegistry.ts";
 
 export type AgentEvent =
     | {type: "start"; agentName: string}
@@ -40,6 +45,7 @@ export abstract class BaseAgent{
     private readonly model: ModelType;
     private modelClient: ModelClient;
     private eventListener: AgentEventListener | undefined;
+    private readonly agentDirectory: AgentDirectory;
 
     protected readonly agentId: number;
     protected readonly agentName: string;
@@ -51,11 +57,30 @@ export abstract class BaseAgent{
         instructions: string,
         agentId: number,
         functionTools: ToolsType,
+        agentDirectory: AgentDirectory = emptyAgentDirectory,
     ) {
-        this.functionTools = functionTools;
+        this.functionTools = [
+            ...functionTools,
+            {
+                type: "function",
+                name: "discover_agents",
+                description: "通过运行时 A2A 目录发现其他在线 Agent。返回对方的职责、技能、Agent Card URL、A2A 消息端点和支持的操作；结果自动排除当前 Agent，可按能力关键词筛选。",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        capability: {
+                            type: "string",
+                            description: "可选的能力关键词，例如 translation、memo、research 或备忘录。省略时返回其他全部在线 Agent。",
+                        },
+                    },
+                    required: [],
+                },
+            },
+        ];
         this.instructions = instructions;
         this.model = model;
         this.modelClient = new ModelClient();
+        this.agentDirectory = agentDirectory;
         this.agentId = agentId;
 
         const max_turn = selectMaxTurnFromAgentTableStmt.get(agentId) as number;
@@ -141,6 +166,40 @@ export abstract class BaseAgent{
 
     protected abstract requestFunctionCall(inputFunctionCallItem: InputFunctionCallItem): Promise<void>;
 
+    protected async requestFunctionCallWithCommonTools(inputFunctionCallItem: InputFunctionCallItem): Promise<void> {
+        if (inputFunctionCallItem.name !== "discover_agents") {
+            await this.requestFunctionCall(inputFunctionCallItem);
+            return;
+        }
+
+        let parsedArguments: unknown;
+        try {
+            parsedArguments = JSON.parse(inputFunctionCallItem.arguments);
+        } catch {
+            this.createFunctionCallOutputItemAndPush(
+                inputFunctionCallItem,
+                "discover_agents 参数解析失败：arguments 不是合法的 JSON。",
+            );
+            return;
+        }
+
+        const result = z.object({
+            capability: z.string().trim().min(1).optional(),
+        }).safeParse(parsedArguments);
+        if (!result.success) {
+            this.createFunctionCallOutputItemAndPush(
+                inputFunctionCallItem,
+                `discover_agents 参数校验失败：${result.error.message}`,
+            );
+            return;
+        }
+
+        this.createFunctionCallOutputItemAndPush(
+            inputFunctionCallItem,
+            JSON.stringify(this.agentDirectory.discover(result.data.capability, this.agentName)),
+        );
+    }
+
     protected createFunctionCallOutputItemAndPush(inputFunctionCallItem: InputFunctionCallItem, output: string){
         const functionCallOutputItem: InputFunctionCallOutputItem = {
             type: "function_call_output",
@@ -196,7 +255,7 @@ export abstract class BaseAgent{
                     }else if(item.type == "function_call"){
                         logger.info(item.type);
                         this.emit({type: "function_call", name: item.name});
-                        await this.requestFunctionCall(item);
+                        await this.requestFunctionCallWithCommonTools(item);
                         hasFunctionCall = true;
                     }else if(item.type == "web_search_call"){
                         logger.info(item.type);
